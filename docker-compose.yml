@@ -1,0 +1,30 @@
+# MTV Source Converter - Docker Compose
+# 定时从 ziyuanzu.com 抓取采集站清单，转换为 MoonTVPlus 配置
+# 通过 HTTP 提供订阅地址，供 MoonTVPlus 的 CONFIG_SUBSCRIPTION_URL 拉取
+
+services:
+  mtv-source-converter:
+    build: .
+    container_name: mtv-source-converter
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      # 数据源地址（ziyuanzu.com 采集站 JSON）
+      SOURCE_URL: https://www.ziyuanzu.com/download/ziyuanzu-cms-interfaces.json
+      # 定时抓取间隔（秒），默认 2 小时
+      FETCH_INTERVAL: "7200"
+      # 启动时是否立即抓取
+      FETCH_ON_START: "true"
+      # HTTP 服务端口
+      HTTP_PORT: "8080"
+      # MoonTVPlus 配置中的 cache_time（秒）
+      CACHE_TIME: "7200"
+      # 抓取请求超时（秒）
+      FETCH_TIMEOUT: "15"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health', timeout=3)"]
+      interval: 5m
+      timeout: 3s
+      retries: 3
+      start_period: 10s

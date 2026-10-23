@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.git/
+.github/
+data/
+*.md
+!README.md
+Dockerfile
+docker-compose.yml
+.dockerignore
+.gitignore
+LICENSE

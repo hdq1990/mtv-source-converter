@@ -1,0 +1,125 @@
+# 🎬 MTV Source Converter
+
+定时从 [ziyuanzu.com](https://www.ziyuanzu.com) 抓取影视采集站清单，转换为 [MoonTVPlus](https://github.com/mtvpls/MoonTVPlus) 可用的 `api_site` 配置，通过 HTTP 提供订阅地址。
+
+## ✨ 功能特性
+
+- ⏰ **定时抓取** — 默认每 2 小时从 ziyuanzu.com 拉取最新采集站清单
+- 🔄 **自动转换** — 苹果 CMS V10 接口直接转换为 MoonTVPlus `api_site` 格式
+- 📡 **HTTP 订阅** — 提供 `/config.json` 订阅地址，MoonTVPlus 直接拉取
+- 🐳 **Docker 运行** — 零依赖，单个 Python 标准库脚本，镜像仅 ~50MB
+- 📊 **状态页面** — 内置 Web 面板查看采集站数量、抓取次数、最后更新时间
+- 🔁 **自动重试** — 抓取失败时指数退避重试，服务不中断
+- 🏗️ **CI/CD 构建** — GitHub Actions 自动构建推送 Docker 镜像到 GHCR
+
+## 📋 工作原理
+
+```
+ziyuanzu.com (每2h更新)  →  HTTP 抓取  →  转换为 MoonTVPlus api_site
+                                    ↓
+                        HTTP 订阅服务 (:8080)
+                                    ↓
+                         MoonTVPlus CONFIG_SUBSCRIPTION_URL
+```
+
+1. 从 `https://www.ziyuanzu.com/download/ziyuanzu-cms-interfaces.json` 下载采集站清单
+2. 该文件由网站 CI/CD 每 2 小时自动更新，仅收录可用率 ≥ 95% 的站点
+3. 将每个采集站的苹果 CMS V10 API 地址转换为 MoonTVPlus 的 `api_site` 条目
+4. 通过 HTTP 服务暴露配置，MoonTVPlus 通过订阅地址拉取
+
+## 🚀 快速开始
+
+### Docker Compose 部署
+
+```bash
+git clone https://github.com/<your-username>/mtv-source-converter.git
+cd mtv-source-converter
+docker compose up -d --build
+```
+
+### 直接运行
+
+```bash
+python main.py
+```
+
+### 调试模式（单次抓取）
+
+```bash
+python main.py --once
+```
+
+## ⚙️ 环境变量
+
+| 变量名 | 默认值 | 说明 |
+|--------|--------|------|
+| `SOURCE_URL` | `https://www.ziyuanzu.com/download/ziyuanzu-cms-interfaces.json` | 采集站 JSON 下载地址 |
+| `FETCH_INTERVAL` | `7200` | 定时抓取间隔（秒） |
+| `FETCH_ON_START` | `true` | 启动时是否立即抓取 |
+| `HTTP_PORT` | `8080` | HTTP 服务监听端口 |
+| `CACHE_TIME` | `7200` | MoonTVPlus 配置中的 cache_time（秒） |
+| `FETCH_TIMEOUT` | `15` | 抓取请求超时（秒） |
+
+## 📡 API 端点
+
+| 端点 | 说明 |
+|------|------|
+| `GET /config.json` | **MoonTVPlus 订阅地址** — 返回完整配置文件 |
+| `GET /config.txt` | TVBox 风格 TXT 格式（名称\|API\|类型\|可用率） |
+| `GET /` | Web 状态面板 |
+| `GET /health` | 健康检查 |
+| `GET /stats` | 统计信息 + 全部源列表 |
+
+## 🔗 与 MoonTVPlus 配合使用
+
+在 MoonTVPlus 的 `docker-compose.yml` 中添加环境变量：
+
+```yaml
+services:
+  moontv-core:
+    image: ghcr.io/mtvpls/moontvplus:latest
+    environment:
+      # ... 其他配置 ...
+      CONFIG_SUBSCRIPTION_URL: http://mtv-source-converter:8080/config.json
+```
+
+或在 MoonTVPlus 管理面板 → 配置管理 → 订阅地址中直接填入：
+
+```
+http://<服务器IP>:8080/config.json
+```
+
+## 🏗️ GitHub Actions 自动构建
+
+推送代码到 `main` 分支后，GitHub Actions 自动构建并推送 Docker 镜像到 GHCR：
+
+```bash
+docker pull ghcr.io/<your-username>/mtv-source-converter:latest
+```
+
+## 📁 项目结构
+
+```
+mtv-source-converter/
+├── main.py              # 主程序入口（定时调度 + HTTP 服务）
+├── fetcher.py           # 抓取模块（urllib 标准库）
+├── converter.py         # 转换模块（采集站 → MoonTVPlus api_site）
+├── server.py            # HTTP 订阅服务
+├── config.py            # 配置常量（环境变量）
+├── Dockerfile           # Docker 镜像构建
+├── docker-compose.yml   # Docker Compose 部署
+├── .github/workflows/
+│   └── docker-build.yml # GitHub Actions 自动构建推送
+└── README.md
+```
+
+## 📦 技术栈
+
+- **Python 3.12** — 纯标准库，零第三方 pip 依赖
+- **http.server** — 内置 HTTP 服务，无需 Flask/FastAPI
+- **urllib.request** — HTTP 抓取，无需 requests
+- **Docker** — 轻量容器化部署
+
+## 📄 License
+
+[MIT](LICENSE)
