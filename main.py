@@ -30,7 +30,7 @@ from server import ConfigStore, SubscriptionServer
 
 
 def do_fetch_and_convert(store: ConfigStore):
-    """抓取 + 转换 + 更新存储"""
+    """抓取 + 转换（生成屏蔽/不屏蔽两个版本）+ 更新存储"""
     print(f"[{time.strftime('%H:%M:%S')}] 开始抓取: {SOURCE_URL}")
     sites, error = fetch_with_retry()
 
@@ -39,12 +39,16 @@ def do_fetch_and_convert(store: ConfigStore):
         print(f"[{time.strftime('%H:%M:%S')}] ❌ 抓取失败: {error}")
         return False
 
-    config = convert_to_moontvplus(sites, cache_time=CACHE_TIME)
-    tvbox_text = convert_to_tvbox(sites)
+    # 生成两个版本：不屏蔽（全部）和屏蔽成人
+    config_full = convert_to_moontvplus(sites, cache_time=CACHE_TIME, filter_adult=False)
+    config_safe = convert_to_moontvplus(sites, cache_time=CACHE_TIME, filter_adult=True)
+    tvbox_full = convert_to_tvbox(sites, filter_adult=False)
+    tvbox_safe = convert_to_tvbox(sites, filter_adult=True)
 
-    store.update(config, tvbox_text)
+    store.update(config_full, tvbox_full, config_safe, tvbox_safe)
     meta = store.get_meta()
-    print(f"[{time.strftime('%H:%M:%S')}] ✅ 抓取成功: {meta['site_count']} 个采集站")
+    print(f"[{time.strftime('%H:%M:%S')}] ✅ 抓取成功: {meta['site_count']} 个采集站（全部）")
+    print(f"  屏蔽版: {meta['safe_count']} 个采集站")
     return True
 
 
@@ -70,26 +74,27 @@ def main():
         print("=== 调试模式：单次抓取 ===")
         do_fetch_and_convert(store)
         meta = store.get_meta()
-        config = store.get_config()
-        print(f"\n站点数: {meta['site_count']}")
-        print(f"配置文件示例（前 3 个站点）:")
-        print(json.dumps(dict(list(config["api_site"].items())[:3]),
+        config_full = store.get_config_full()
+        config_safe = store.get_config_safe()
+        print(f"\n站点数: 全部 {meta['site_count']} 个，屏蔽版 {meta['safe_count']} 个")
+        print(f"\n配置文件示例（全部版，前 3 个站点）:")
+        print(json.dumps(dict(list(config_full["api_site"].items())[:3]),
+                         ensure_ascii=False, indent=2))
+        print(f"\n配置文件示例（屏蔽版，前 3 个站点）:")
+        print(json.dumps(dict(list(config_safe["api_site"].items())[:3]),
                          ensure_ascii=False, indent=2))
         return
 
-    # 启动时先抓取一次
-    if FETCH_ON_START:
-        print("=== 启动首次抓取 ===")
-        do_fetch_and_convert(store)
+    # 启动 HTTP 订阅服务（先启动，抓取在后台进行）
+    print(f"=== HTTP 服务配置: {HTTP_HOST}:{HTTP_PORT} ===")
+    server = SubscriptionServer(store, host=HTTP_HOST, port=HTTP_PORT)
 
-    # 启动定时抓取线程
+    # 启动定时抓取线程（后台运行）
     print(f"=== 定时抓取已启动，间隔 {FETCH_INTERVAL}s ===")
     fetch_thread = threading.Thread(target=fetch_loop, args=(store, FETCH_INTERVAL), daemon=True)
     fetch_thread.start()
 
-    # 启动 HTTP 订阅服务（主线程）
-    print(f"=== HTTP 服务配置: {HTTP_HOST}:{HTTP_PORT} ===")
-    server = SubscriptionServer(store, host=HTTP_HOST, port=HTTP_PORT)
+    # 启动 HTTP 服务（主线程）
     server.start()
 
 

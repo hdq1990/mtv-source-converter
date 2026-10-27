@@ -20,10 +20,8 @@ def fetch_sites(url=SOURCE_URL, timeout=FETCH_TIMEOUT):
     返回: list[dict]，每个 dict 包含 name/api/apiType/uptime 等字段
     异常: 抛出 urllib.error.URLError 或 json.JSONDecodeError
     """
-    # ziyuanzu.com 的 SSL 证书可能在某些环境下有问题，跳过验证
+    # 使用默认 SSL 验证（关闭验证会导致握手超时）
     ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
 
     req = urllib.request.Request(url, headers={
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "

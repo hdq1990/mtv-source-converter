@@ -21,42 +21,59 @@ from config import HTTP_HOST, HTTP_PORT, CACHE_TIME
 
 
 class ConfigStore:
-    """线程安全的内存配置存储"""
+    """线程安全的内存配置存储（支持屏蔽/不屏蔽两个版本）"""
 
     def __init__(self):
         self._lock = threading.Lock()
-        self._config = {"cache_time": CACHE_TIME, "api_site": {}}
-        self._tvbox_text = ""
+        # 不屏蔽版本（全部站点）
+        self._config_full = {"cache_time": CACHE_TIME, "api_site": {}}
+        self._tvbox_full = ""
+        # 屏蔽版本（过滤成人站）
+        self._config_safe = {"cache_time": CACHE_TIME, "api_site": {}}
+        self._tvbox_safe = ""
         self._last_updated = ""
         self._fetch_count = 0
         self._site_count = 0
+        self._safe_count = 0
         self._last_error = ""
 
-    def update(self, config, tvbox_text):
+    def update(self, config_full, tvbox_full, config_safe, tvbox_safe):
         with self._lock:
-            self._config = config
-            self._tvbox_text = tvbox_text
+            self._config_full = config_full
+            self._tvbox_full = tvbox_full
+            self._config_safe = config_safe
+            self._tvbox_safe = tvbox_safe
             self._last_updated = time.strftime("%Y-%m-%d %H:%M:%S")
             self._fetch_count += 1
-            self._site_count = len(config.get("api_site", {}))
+            self._site_count = len(config_full.get("api_site", {}))
+            self._safe_count = len(config_safe.get("api_site", {}))
             self._last_error = ""
 
     def mark_error(self, error_msg):
         with self._lock:
             self._last_error = error_msg
 
-    def get_config(self):
+    def get_config_full(self):
         with self._lock:
-            return dict(self._config)
+            return dict(self._config_full)
 
-    def get_tvbox(self):
+    def get_config_safe(self):
         with self._lock:
-            return self._tvbox_text
+            return dict(self._config_safe)
+
+    def get_tvbox_full(self):
+        with self._lock:
+            return self._tvbox_full
+
+    def get_tvbox_safe(self):
+        with self._lock:
+            return self._tvbox_safe
 
     def get_meta(self):
         with self._lock:
             return {
                 "site_count": self._site_count,
+                "safe_count": self._safe_count,
                 "fetch_count": self._fetch_count,
                 "last_updated": self._last_updated,
                 "last_error": self._last_error,
@@ -109,9 +126,13 @@ class SubscriptionServer:
                 if path == "/":
                     self._handle_index()
                 elif path == "/config.json":
-                    self._handle_config_json()
+                    self._handle_config_json(full=True)
+                elif path == "/config-safe.json":
+                    self._handle_config_json(full=False)
                 elif path == "/config.txt":
-                    self._handle_config_txt()
+                    self._handle_config_txt(full=True)
+                elif path == "/config-safe.txt":
+                    self._handle_config_txt(full=False)
                 elif path == "/health":
                     self._handle_health()
                 elif path == "/stats":
@@ -127,6 +148,7 @@ class SubscriptionServer:
 
             def _handle_index(self):
                 meta = store.get_meta()
+                port = self.server.server_port
                 html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -140,19 +162,39 @@ code{{background:#f5f5f5;padding:2px 6px;border-radius:4px;font-size:.9em}}
 a{{color:#2563eb;text-decoration:none}}a:hover{{text-decoration:underline}}
 .badge{{display:inline-block;padding:2px 8px;border-radius:4px;font-size:.8em}}
 .ok{{background:#d1fae5;color:#065f46}}.err{{background:#fee2e2;color:#991b1b}}
+.sub{{display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid #eee}}
+.sub-label{{font-weight:bold;width:120px;flex-shrink:0}}
+.sub-url{{font-family:monospace;font-size:.85em;color:#2563eb}}
+.sub-count{{margin-left:auto;font-size:.8em;color:#666}}
 </style>
 </head>
 <body>
 <h1>🎬 MTV Source Converter</h1>
 <p>定时从 ziyuanzu.com 抓取采集站清单，转换为 MoonTVPlus 可用配置。</p>
 <div class="card">
-<h3>订阅地址</h3>
-<p>MoonTVPlus 订阅: <code>http://&lt;本机IP&gt;:{self.server.server_port}/config.json</code></p>
-<p>TVBox 格式: <code>http://&lt;本机IP&gt;:{self.server.server_port}/config.txt</code></p>
+<h3>📡 订阅地址（两个版本）</h3>
+<div class="sub">
+<span class="sub-label">📦 全部站点</span>
+<a href="/config.json"><code>http://&lt;本机IP&gt;:{port}/config.json</code></a>
+<span class="sub-count">{meta['site_count']} 个站点</span>
+</div>
+<div class="sub">
+<span class="sub-label">🛡️ 屏蔽成人版</span>
+<a href="/config-safe.json"><code>http://&lt;本机IP&gt;:{port}/config-safe.json</code></a>
+<span class="sub-count">{meta['safe_count']} 个站点</span>
+</div>
+<div class="sub">
+<span class="sub-label">📄 TVBox 全部</span>
+<a href="/config.txt"><code>http://&lt;本机IP&gt;:{port}/config.txt</code></a>
+</div>
+<div class="sub">
+<span class="sub-label">📄 TVBox 屏蔽版</span>
+<a href="/config-safe.txt"><code>http://&lt;本机IP&gt;:{port}/config-safe.txt</code></a>
+</div>
 </div>
 <div class="card">
 <h3>运行状态</h3>
-<p>采集站数量: <b>{meta['site_count']}</b></p>
+<p>全部站点: <b>{meta['site_count']}</b> · 屏蔽版: <b>{meta['safe_count']}</b></p>
 <p>抓取次数: <b>{meta['fetch_count']}</b></p>
 <p>最后更新: <b>{meta['last_updated'] or '尚未抓取'}</b></p>
 <p>最近错误: {('<span class="err">' + meta['last_error'] + '</span>') if meta['last_error'] else '<span class="ok">无</span>'}</p>
@@ -160,8 +202,10 @@ a{{color:#2563eb;text-decoration:none}}a:hover{{text-decoration:underline}}
 <div class="card">
 <h3>API 端点</h3>
 <ul>
-<li><a href="/config.json">GET /config.json</a> - MoonTVPlus 配置</li>
-<li><a href="/config.txt">GET /config.txt</a> - TVBox TXT 格式</li>
+<li><a href="/config.json">GET /config.json</a> - 全部站点配置</li>
+<li><a href="/config-safe.json">GET /config-safe.json</a> - 屏蔽成人版配置</li>
+<li><a href="/config.txt">GET /config.txt</a> - TVBox 全部格式</li>
+<li><a href="/config-safe.txt">GET /config-safe.txt</a> - TVBox 屏蔽版格式</li>
 <li><a href="/health">GET /health</a> - 健康检查</li>
 <li><a href="/stats">GET /stats</a> - 统计信息</li>
 </ul>
@@ -170,16 +214,28 @@ a{{color:#2563eb;text-decoration:none}}a:hover{{text-decoration:underline}}
 </html>"""
                 self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
 
-            def _handle_config_json(self):
-                config = store.get_config()
+            def _handle_config_json(self, full=True):
+                if full:
+                    config = store.get_config_full()
+                    label = "全部站点"
+                else:
+                    config = store.get_config_safe()
+                    label = "屏蔽成人版"
                 body = json.dumps(config, ensure_ascii=False, indent=2).encode("utf-8")
+                print(f"  📡 {label} 订阅: {len(config.get('api_site', {}))} 个站点")
                 self._send(200, body, "application/json; charset=utf-8")
 
-            def _handle_config_txt(self):
-                text = store.get_tvbox()
+            def _handle_config_txt(self, full=True):
+                if full:
+                    text = store.get_tvbox_full()
+                    label = "全部站点"
+                else:
+                    text = store.get_tvbox_safe()
+                    label = "屏蔽成人版"
                 if not text:
                     self._send_json({"error": "config not ready"}, 503)
                     return
+                print(f"  📡 {label} TXT: {len(text.split(chr(10)))} 行")
                 self._send(200, text.encode("utf-8"))
 
             def _handle_health(self):
@@ -189,15 +245,20 @@ a{{color:#2563eb;text-decoration:none}}a:hover{{text-decoration:underline}}
 
             def _handle_stats(self):
                 meta = store.get_meta()
-                config = store.get_config()
-                sites = config.get("api_site", {})
-                # 统计资源量（如果有）
+                config_full = store.get_config_full()
+                config_safe = store.get_config_safe()
+                sites_full = config_full.get("api_site", {})
+                sites_safe = config_safe.get("api_site", {})
                 self._send_json({
                     **meta,
-                    "cache_time": config.get("cache_time"),
-                    "sources": [
+                    "cache_time": config_full.get("cache_time"),
+                    "total_sources": [
                         {"key": k, "name": v["name"], "api": v["api"]}
-                        for k, v in sites.items()
+                        for k, v in sites_full.items()
+                    ],
+                    "safe_sources": [
+                        {"key": k, "name": v["name"], "api": v["api"]}
+                        for k, v in sites_safe.items()
                     ],
                 })
 

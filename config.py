@@ -24,7 +24,7 @@ HTTP_PORT = int(os.environ.get("HTTP_PORT", "8080"))
 CACHE_TIME = int(os.environ.get("CACHE_TIME", "7200"))
 
 # 抓取请求超时（秒）
-FETCH_TIMEOUT = int(os.environ.get("FETCH_TIMEOUT", "15"))
+FETCH_TIMEOUT = int(os.environ.get("FETCH_TIMEOUT", "30"))
 
 # 首次启动时是否立即抓取一次（true/false）
 FETCH_ON_START = os.environ.get("FETCH_ON_START", "true").lower() == "true"
