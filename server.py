@@ -3,11 +3,13 @@
 HTTP 订阅服务
 
 提供以下路由：
-  GET /            - 服务信息页（HTML）
-  GET /config.json - MoonTVPlus 配置文件（订阅地址）
-  GET /config.txt  - TVBox 风格 TXT 格式
-  GET /health      - 健康检查
-  GET /stats       - 统计信息
+  GET /                - 服务信息页（HTML）
+  GET /config.json     - 全部站点 MoonTVPlus 配置（订阅地址）
+  GET /config-safe.json - 屏蔽成人版 MoonTVPlus 配置（订阅地址）
+  GET /config.txt      - TVBox 风格 TXT（全部站点）
+  GET /config-safe.txt - TVBox 风格 TXT（屏蔽成人版）
+  GET /health          - 健康检查
+  GET /stats           - 统计信息
 
 纯 Python 标准库实现，零第三方依赖
 """
@@ -104,8 +106,10 @@ class SubscriptionServer:
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, format, *args):
-                # 简化日志输出
-                print(f"  [{self.address_string()}] {format % args}")
+                # 简化日志输出：只记录 GET 请求的路径
+                msg = format % args
+                if "GET" in msg or "HEAD" in msg:
+                    print(f"  {msg}")
 
             def _send(self, code, body, content_type="text/plain; charset=utf-8"):
                 self.send_response(code)
@@ -217,25 +221,19 @@ a{{color:#2563eb;text-decoration:none}}a:hover{{text-decoration:underline}}
             def _handle_config_json(self, full=True):
                 if full:
                     config = store.get_config_full()
-                    label = "全部站点"
                 else:
                     config = store.get_config_safe()
-                    label = "屏蔽成人版"
                 body = json.dumps(config, ensure_ascii=False, indent=2).encode("utf-8")
-                print(f"  📡 {label} 订阅: {len(config.get('api_site', {}))} 个站点")
                 self._send(200, body, "application/json; charset=utf-8")
 
             def _handle_config_txt(self, full=True):
                 if full:
                     text = store.get_tvbox_full()
-                    label = "全部站点"
                 else:
                     text = store.get_tvbox_safe()
-                    label = "屏蔽成人版"
                 if not text:
                     self._send_json({"error": "config not ready"}, 503)
                     return
-                print(f"  📡 {label} TXT: {len(text.split(chr(10)))} 行")
                 self._send(200, text.encode("utf-8"))
 
             def _handle_health(self):

@@ -21,7 +21,7 @@ import threading
 import time
 
 from config import (
-    SOURCE_URL, FETCH_INTERVAL, FETCH_ON_START,
+    SOURCE_URL, FETCH_INTERVAL,
     HTTP_HOST, HTTP_PORT, CACHE_TIME,
 )
 from fetcher import fetch_with_retry

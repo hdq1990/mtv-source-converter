@@ -6,7 +6,7 @@
 
 - ⏰ **定时抓取** — 默认每 2 小时从 ziyuanzu.com 拉取最新采集站清单
 - 🔄 **自动转换** — 苹果 CMS V10 接口直接转换为 MoonTVPlus `api_site` 格式
-- 📡 **HTTP 订阅** — 提供 `/config.json` 订阅地址，MoonTVPlus 直接拉取
+- 📡 **双版本订阅** — 提供全部站点（73个）和屏蔽成人版（58个）两个订阅地址
 - 🐳 **Docker 运行** — 零依赖，单个 Python 标准库脚本，镜像仅 ~50MB
 - 📊 **状态页面** — 内置 Web 面板查看采集站数量、抓取次数、最后更新时间
 - 🔁 **自动重试** — 抓取失败时指数退避重试，服务不中断
@@ -55,10 +55,9 @@ python main.py --once
 |--------|--------|------|
 | `SOURCE_URL` | `https://www.ziyuanzu.com/download/ziyuanzu-cms-interfaces.json` | 采集站 JSON 下载地址 |
 | `FETCH_INTERVAL` | `7200` | 定时抓取间隔（秒） |
-| `FETCH_ON_START` | `true` | 启动时是否立即抓取 |
 | `HTTP_PORT` | `8080` | HTTP 服务监听端口 |
 | `CACHE_TIME` | `7200` | MoonTVPlus 配置中的 cache_time（秒） |
-| `FETCH_TIMEOUT` | `15` | 抓取请求超时（秒） |
+| `FETCH_TIMEOUT` | `30` | 抓取请求超时（秒） |
 
 ## 📡 API 端点
 
