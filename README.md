@@ -64,11 +64,22 @@ python main.py --once
 
 | 端点 | 说明 |
 |------|------|
-| `GET /config.json` | **MoonTVPlus 订阅地址** — 返回完整配置文件 |
-| `GET /config.txt` | TVBox 风格 TXT 格式（名称\|API\|类型\|可用率） |
+| `GET /config.json` | **全部站点订阅** — 73 个采集站（不过滤） |
+| `GET /config-safe.json` | **屏蔽成人版订阅** — 58 个采集站（过滤成人内容） |
+| `GET /config.txt` | TVBox 风格 TXT（全部站点） |
+| `GET /config-safe.txt` | TVBox 风格 TXT（屏蔽成人版） |
 | `GET /` | Web 状态面板 |
 | `GET /health` | 健康检查 |
 | `GET /stats` | 统计信息 + 全部源列表 |
+
+### 两个订阅版本
+
+| 版本 | 订阅地址 | 站点数 | 适用场景 |
+|------|---------|--------|---------|
+| 📦 全部站点 | `http://<IP>:8080/config.json` | 73 | 完整资源覆盖 |
+| 🛡️ 屏蔽成人版 | `http://<IP>:8080/config-safe.json` | 58 | 家庭/公开场景 |
+
+屏蔽版会过滤名称或域名中包含成人关键词的采集站（湿乐园、番号、麻豆、黑料、色猫等）。
 
 ## 🔗 与 MoonTVPlus 配合使用
 
