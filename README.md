@@ -7,7 +7,8 @@
 - ⏰ **定时抓取** — 默认每 2 小时从 ziyuanzu.com 拉取最新采集站清单
 - 🔄 **自动转换** — 苹果 CMS V10 接口直接转换为 MoonTVPlus `api_site` 格式
 - 📡 **双版本订阅** — 提供全部站点（73个）和屏蔽成人版（58个）两个订阅地址
-- 🐳 **Docker 运行** — 零依赖，单个 Python 标准库脚本，镜像仅 ~50MB
+- 🐳 **Docker 运行** — Python 标准库实现，镜像仅 ~50MB
+- 🌐 **Cloudflare Workers** — TypeScript 实现，全球边缘网络，免费部署
 - 📊 **状态页面** — 内置 Web 面板查看采集站数量、抓取次数、最后更新时间
 - 🔁 **自动重试** — 抓取失败时指数退避重试，服务不中断
 - 🏗️ **CI/CD 构建** — GitHub Actions 自动构建推送 Docker 镜像到 GHCR
@@ -29,7 +30,21 @@ ziyuanzu.com (每2h更新)  →  HTTP 抓取  →  转换为 MoonTVPlus api_site
 
 ## 🚀 快速开始
 
-### Docker Compose 部署
+### 方案 A：Cloudflare Workers（推荐公开订阅）
+
+```bash
+cd cloudflare
+npm install
+npx wrangler login
+npx wrangler kv namespace create CONFIG
+# 将 KV Namespace ID 填入 wrangler.toml
+npm run dev    # 本地测试
+npm run deploy # 部署到 Cloudflare
+```
+
+部署后访问 `https://<worker>.workers.dev/`，详细指南见 [cloudflare/README.md](cloudflare/README.md)。
+
+### 方案 C：Docker Compose 部署（推荐内网自用）
 
 ```bash
 git clone https://github.com/<your-username>/mtv-source-converter.git
@@ -37,13 +52,13 @@ cd mtv-source-converter
 docker compose up -d --build
 ```
 
-### 直接运行
+### 方案 C：直接运行
 
 ```bash
 python main.py
 ```
 
-### 调试模式（单次抓取）
+### 方案 C：调试模式（单次抓取）
 
 ```bash
 python main.py --once
@@ -111,6 +126,7 @@ docker pull ghcr.io/<your-username>/mtv-source-converter:latest
 
 ```
 mtv-source-converter/
+├── # 方案 C：Docker 部署（Python）
 ├── main.py              # 主程序入口（定时调度 + HTTP 服务）
 ├── fetcher.py           # 抓取模块（urllib 标准库）
 ├── converter.py         # 转换模块（采集站 → MoonTVPlus api_site）
@@ -120,15 +136,39 @@ mtv-source-converter/
 ├── docker-compose.yml   # Docker Compose 部署
 ├── .github/workflows/
 │   └── docker-build.yml # GitHub Actions 自动构建推送
+│
+├── # 方案 A：Cloudflare Workers 部署（TypeScript）
+├── cloudflare/
+│   ├── src/
+│   │   ├── index.ts     # Workers 入口（fetch + scheduled）
+│   │   ├── config.ts    # 配置常量
+│   │   ├── fetcher.ts   # 抓取模块（fetch API）
+│   │   ├── converter.ts # 转换模块（采集站 → MoonTVPlus api_site）
+│   │   └── store.ts     # KV 存储模块
+│   ├── wrangler.toml    # Workers 配置（KV + Cron）
+│   ├── package.json     # npm 依赖
+│   ├── tsconfig.json    # TypeScript 配置
+│   └── README.md        # Workers 部署指南
+│
 └── README.md
 ```
 
 ## 📦 技术栈
 
+### 方案 C：Docker 部署（Python）
+
 - **Python 3.12** — 纯标准库，零第三方 pip 依赖
 - **http.server** — 内置 HTTP 服务，无需 Flask/FastAPI
 - **urllib.request** — HTTP 抓取，无需 requests
 - **Docker** — 轻量容器化部署
+
+### 方案 A：Cloudflare Workers 部署（TypeScript）
+
+- **TypeScript** — 类型安全，编译到 JavaScript
+- **Cloudflare Workers** — 边缘计算，全球低延迟
+- **KV Storage** — 持久化存储配置数据
+- **Cron Triggers** — 定时抓取任务
+- **fetch API** — 原生 HTTP 请求
 
 ## 📄 License
 
