@@ -21,6 +21,26 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
 from config import HTTP_HOST, HTTP_PORT, CACHE_TIME
 
+# Base58 字符集（Bitcoin 标准）
+BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+
+def base58_encode(data: bytes) -> str:
+    """Base58 编码"""
+    num = int.from_bytes(data, 'big')
+    encoded = ""
+    while num > 0:
+        num, rem = divmod(num, 58)
+        encoded = BASE58_ALPHABET[rem] + encoded
+    # 处理前导零
+    pad = 0
+    for byte in data:
+        if byte == 0:
+            pad += 1
+        else:
+            break
+    return '1' * pad + encoded
+
 
 class ConfigStore:
     """线程安全的内存配置存储（支持屏蔽/不屏蔽两个版本）"""
@@ -223,8 +243,11 @@ a{{color:#2563eb;text-decoration:none}}a:hover{{text-decoration:underline}}
                     config = store.get_config_full()
                 else:
                     config = store.get_config_safe()
-                body = json.dumps(config, ensure_ascii=False, indent=2).encode("utf-8")
-                self._send(200, body, "application/json; charset=utf-8")
+                # MoonTVPlus 订阅地址要求 Base58 编码的 JSON
+                json_text = json.dumps(config, ensure_ascii=False, indent=2)
+                b58_encoded = base58_encode(json_text.encode("utf-8"))
+                body = b58_encoded.encode("utf-8")
+                self._send(200, body, "text/plain; charset=utf-8")
 
             def _handle_config_txt(self, full=True):
                 if full:
