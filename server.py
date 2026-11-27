@@ -175,6 +175,13 @@ class SubscriptionServer:
         class Handler(BaseHTTPRequestHandler):
             server_version = "MTVSourceConverter/1.0"
             sys_version = ""
+            # HTTP/1.1 才能复用连接（订阅客户端一般是 keep-alive）；
+            # 所有响应都带 Content-Length，所以不需要 chunked 或 close 兜底
+            protocol_version = "HTTP/1.1"
+
+            def version_string(self):
+                # 默认实现是 server_version + ' ' + sys_version，会留个尾空格
+                return self.server_version
 
             def log_message(self, format, *args):
                 # 简化日志输出：只记录 GET / HEAD 请求
