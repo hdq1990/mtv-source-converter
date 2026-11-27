@@ -10,7 +10,12 @@ preview_urls = true
 enabled = true
 
 [triggers]
-crons = ["0 */2 * * *"]
+# 每 2 小时两跳：
+#   第 0 分 → 抓取 + 转换 + 编码「全部版」+ 写全部 KV
+#   第 2 分 → 只给「屏蔽版」补 Base58 编码（从 KV 读明文，不再打上游）
+# 拆开是为了把单次调用的 Base58 编码 CPU 从 28 ms 压到 14 ms，
+# 尽量贴合 Workers 免费套餐 10 ms/次 的 CPU 预算。
+crons = ["0 */2 * * *", "2 */2 * * *"]
 
 [[kv_namespaces]]
 binding = "CONFIG"

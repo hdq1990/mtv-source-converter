@@ -25,3 +25,9 @@ CACHE_TIME = int(os.environ.get("CACHE_TIME", "7200"))
 
 # 抓取请求超时（秒）
 FETCH_TIMEOUT = int(os.environ.get("FETCH_TIMEOUT", "30"))
+
+# 抓取失败重试次数（与 Workers 版的 FETCH_RETRIES 对应）
+FETCH_RETRIES = int(os.environ.get("FETCH_RETRIES", "3"))
+
+# 数据超过这么多小时没更新就判定为 stale（与 Workers 版同名变量对应）
+STALE_IF_ERROR_HOURS = int(os.environ.get("STALE_IF_ERROR_HOURS", "72"))

@@ -12,6 +12,7 @@
 - 📊 **状态页面** — 内置 Web 面板查看采集站数量、抓取次数、最后更新时间
 - 🔁 **自动重试** — 抓取失败时指数退避重试，服务不中断
 - 🧊 **冷启动兜底** — KV 为空时在请求内实时抓取并回写，首个请求也不会空手而归
+- 🩺 **健康检查带陈旧判定** — 数据超过 72 小时未更新，`/health` 返回 `status: stale`
 
 ## 📋 工作原理
 
@@ -26,7 +27,8 @@ ziyuanzu.com (每2h更新)  →  HTTP 抓取  →  转换为 MoonTVPlus api_site
 1. 从 `https://www.ziyuanzu.com/download/ziyuanzu-cms-interfaces.json` 下载采集站清单
 2. 该文件由网站 CI/CD 每 2 小时自动更新，仅收录可用率 ≥ 95% 的站点
 3. 将每个采集站的苹果 CMS V10 API 地址转换为 MoonTVPlus 的 `api_site` 条目
-4. 通过 HTTP 服务暴露配置，MoonTVPlus 通过订阅地址拉取
+4. MoonTVPlus 订阅地址要求 **Base58 编码的 JSON**，服务端在数据更新时就编码好，请求直接返回字符串
+5. 通过 HTTP 服务暴露配置，MoonTVPlus 通过订阅地址拉取
 
 ## 🚀 快速开始
 
@@ -41,7 +43,7 @@ npx wrangler kv namespace create CONFIG
 npm run deploy
 ```
 
-部署后访问 `https://mtv-source-converter.<你的子域>.workers.dev/`，详细指南见 [cloudflare/README.md](cloudflare/README.md)。
+部署后访问 `https://mtv-source-converter.<你的子域>.workers.dev/`，详细指南（含 CPU 预算说明、故障排查、GitHub Actions 预热方案）见 [cloudflare/README.md](cloudflare/README.md)。
 
 MoonTVPlus 订阅地址：
 
@@ -49,15 +51,17 @@ MoonTVPlus 订阅地址：
 https://mtv-source-converter.<你的子域>.workers.dev/config.json
 ```
 
-### 方案 B：Docker Compose 部署（内网自用）
+> ⚠️ Base58 编码单份约 14 ms CPU，而 Workers 免费套餐是 10 ms/次。本项目已把编码放进 Cron、请求路径零编码，但 Cron 那次仍会小幅超出。若 Dashboard 里出现 `exceededCpu`，用 Docker 版做订阅源、或升级 Workers Paid（$5/月）、或用 GitHub Actions 预热 KV —— 三种做法都写在 [cloudflare/README.md](cloudflare/README.md) 里。
+
+### 方案 B1：Docker Compose 部署（内网自用，CPU 不受限）
 
 ```bash
-git clone https://github.com/<your-username>/mtv-source-converter.git
+git clone https://github.com/hdq1990/mtv-source-converter.git
 cd mtv-source-converter
 docker compose up -d --build
 ```
 
-### 方案 B：直接运行（Python）
+### 方案 B2：直接运行（Python 3.12+）
 
 ```bash
 python main.py
@@ -71,13 +75,18 @@ python main.py --once
 
 ## ⚙️ 环境变量
 
+两个版本的变量名保持一致，Docker 用 `environment`、Workers 用 `wrangler.toml` 的 `[vars]`。
+
 | 变量名 | 默认值 | 说明 |
 |--------|--------|------|
 | `SOURCE_URL` | `https://www.ziyuanzu.com/download/ziyuanzu-cms-interfaces.json` | 采集站 JSON 下载地址 |
-| `FETCH_INTERVAL` | `7200` | 定时抓取间隔（秒） |
-| `HTTP_PORT` | `8080` | HTTP 服务监听端口 |
+| `FETCH_INTERVAL` | `7200` | 定时抓取间隔（秒，仅 Python 版；Workers 用 Cron 表达式） |
+| `HTTP_PORT` | `8080` | HTTP 服务监听端口（仅 Python 版） |
 | `CACHE_TIME` | `7200` | MoonTVPlus 配置中的 cache_time（秒） |
 | `FETCH_TIMEOUT` | `30` | 抓取请求超时（秒） |
+| `FETCH_RETRIES` | `3` | 抓取失败重试次数（指数退避 2s/4s/8s；数据格式错误不重试） |
+| `STALE_IF_ERROR_HOURS` | `72` | 数据超过这么多小时没更新，`/health` 判定为 `stale` |
+| `ADMIN_TOKEN` | 空 | 仅 Workers 版：`POST /refresh` 的鉴权口令，留空则禁用该端点 |
 
 ## 📡 API 端点
 
@@ -88,9 +97,18 @@ python main.py --once
 | `GET /config.txt` | TVBox 风格 TXT（全部站点） |
 | `GET /config-safe.txt` | TVBox 风格 TXT（屏蔽成人版） |
 | `GET /` | Web 状态面板 |
-| `GET /health` | 健康检查 |
+| `GET /health` | 健康检查（`status`: `ok` / `starting` / `stale`） |
 | `GET /stats` | 统计信息 + 全部源列表 |
 | `POST /refresh` | 手动触发抓取（仅 Workers 版，需 `ADMIN_TOKEN`） |
+
+### 状态码约定
+
+| 情况 | 响应 |
+|------|------|
+| 正常 | `200` + 内容 |
+| 数据还没抓到（Python 版启动后几秒内 / Workers 版 KV 为空） | `503` + `Retry-After: 60` |
+| 上游抓取失败且无旧数据 | `503` + `detail` 说明原因 |
+| `/refresh` 鉴权失败 | `403`（未配置 token）/ `401`（token 错误） |
 
 ### 两个订阅版本
 
@@ -129,11 +147,11 @@ mtv-source-converter/
 ├── # 方案 A：Cloudflare Workers（TypeScript，免费、无服务器）
 ├── cloudflare/
 │   ├── src/
-│   │   ├── index.ts        # Workers 入口（fetch + scheduled + 冷启动兜底）
+│   │   ├── index.ts        # Workers 入口（fetch + scheduled 两跳 + 冷启动兜底）
 │   │   ├── converter.ts    # 转换模块（与 Python 版逻辑等价）
-│   │   ├── fetcher.ts      # 抓取模块（fetch + 指数退避）
-│   │   ├── store.ts        # KV 存储模块
-│   │   └── base58.ts       # Base58（BigInt 实现）
+│   │   ├── fetcher.ts      # 抓取模块（fetch + 指数退避 + 错误分类）
+│   │   ├── store.ts        # KV 存储模块（7 个 key，按需单 key 读）
+│   │   └── base58.ts       # Base58（分块 BigInt 实现）
 │   ├── wrangler.toml       # Workers 配置（KV + Cron）
 │   ├── package.json        # npm 依赖
 │   ├── tsconfig.json       # TypeScript 配置
@@ -158,7 +176,7 @@ mtv-source-converter/
 - **TypeScript** — 类型安全，编译到 JavaScript
 - **Cloudflare Workers** — 边缘计算，全球低延迟，免费额度 10 万请求/天
 - **KV Storage** — 持久化存储配置数据（免费 10 万读/天）
-- **Cron Triggers** — 定时抓取任务（每 2 小时）
+- **Cron Triggers** — 定时抓取任务（每 2 小时，两跳）
 - **fetch API** — 原生 HTTP 请求
 
 ### 方案 B：Docker / Python
@@ -167,6 +185,17 @@ mtv-source-converter/
 - **http.server** — 内置 HTTP 服务，无需 Flask/FastAPI
 - **urllib.request** — HTTP 抓取，无需 requests
 - **Docker** — 轻量容器化部署
+
+## 🔍 一致性说明
+
+两个版本的输出是**逐字节相同**的：
+
+| 数据 | 字节数 | Base58 长度 |
+|------|--------|-------------|
+| 全部版 JSON → Base58 | 6269 B | 8562 字符 |
+| 屏蔽版 JSON → Base58 | 4992 B | 6818 字符 |
+
+对齐的细节：过滤词表、`make_key` 去重规则、JSON 序列化格式（紧凑、无空格、UTF-8 原文）、Base58 字母表（Bitcoin 标准）。
 
 ## 📄 License
 

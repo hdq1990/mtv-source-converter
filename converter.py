@@ -59,8 +59,8 @@ def should_filter_adult(site):
 
     返回: True 表示应过滤（成人站）
     """
-    name = site.get("name", "")
-    api = site.get("api") or site.get("apiUrl", "")
+    name = site.get("name") or ""
+    api = site.get("api") or site.get("apiUrl") or ""
     domain = urlparse(api).netloc.lower() if api else ""
 
     for kw in ADULT_NAME_KEYWORDS:
@@ -94,8 +94,8 @@ def convert_to_moontvplus(sites, cache_time=CACHE_TIME, filter_adult=False):
         used_keys.add(key)
 
         # 兼容字段名：api / apiUrl
-        api = site.get("api") or site.get("apiUrl", "")
-        name = site.get("name", "")
+        api = site.get("api") or site.get("apiUrl") or ""
+        name = site.get("name") or ""
 
         entry = {
             "api": api,
@@ -120,9 +120,12 @@ def convert_to_tvbox(sites, filter_adult=False):
     for site in sites:
         if filter_adult and should_filter_adult(site):
             continue
-        api = site.get("api") or site.get("apiUrl", "")
-        name = site.get("name", "")
-        uptime = site.get("uptime", "")
-        api_type = site.get("apiType", "json")
+        api = site.get("api") or site.get("apiUrl") or ""
+        name = site.get("name") or ""
+        # 与 cloudflare/src/converter.ts 严格对齐：
+        # uptime 只有 None 才当空串（0 要保留成 "0"），apiType 空串回退成 json
+        uptime = site.get("uptime")
+        uptime = "" if uptime is None else str(uptime)
+        api_type = site.get("apiType") or "json"
         lines.append(f"{name}|{api}|{api_type}|{uptime}")
     return "\n".join(lines)

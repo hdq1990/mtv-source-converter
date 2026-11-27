@@ -20,8 +20,12 @@ services:
       CACHE_TIME: "7200"
       # 抓取请求超时（秒）
       FETCH_TIMEOUT: "30"
+      # 抓取失败重试次数（指数退避 2s/4s/8s）
+      FETCH_RETRIES: "3"
+      # 数据超过这么多小时没更新就判定为 stale（/health 显示 status=stale）
+      STALE_IF_ERROR_HOURS: "72"
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health', timeout=3)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
       interval: 5m
       timeout: 3s
       retries: 3

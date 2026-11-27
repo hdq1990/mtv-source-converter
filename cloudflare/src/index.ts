@@ -2,9 +2,14 @@
  * MTV Source Converter — Cloudflare Workers 入口
  *
  * 架构：
- *   Cron Trigger（每 2h）  →  fetch ziyuanzu.com  →  转换  →  写 KV
- *   fetch handler          →  读 KV 直接返回（零上游依赖）
+ *   Cron Trigger（每 2h）  →  fetch ziyuanzu.com → 转换 → Base58 编码 → 写 KV
+ *   fetch handler          →  读 KV 直接返回（零上游依赖，CPU < 1 ms）
  *   兜底                    →  KV 为空时在请求内实时抓取一次并回写
+ *
+ * 为什么 Base58 在 Cron 里算而不是在请求里算：
+ *   一份 73 站的配置序列化后约 6.3 KB，Base58 编码（本项目用的分块实现）约 14 ms
+ *   CPU。Workers 免费套餐每次调用只有 10 ms CPU 预算，放在请求路径里必然触发
+ *   error 1102。放进 Cron 只算一次，请求只读字符串，订阅接口才不会 5xx。
  *
  * 路由与 Python 版 server.py 对齐：
  *   GET /                   状态页
@@ -19,7 +24,25 @@
 import { base58Encode } from './base58';
 import { convertToMoonTVPlus, convertToTvbox, type CmsSite } from './converter';
 import { fetchSites } from './fetcher';
-import { readMeta, readSnapshot, writeError, writeSnapshot } from './store';
+import {
+  readConfigB58,
+  readConfigJson,
+  readMeta,
+  readTvbox,
+  writeConfigB58,
+  writeError,
+  writeSnapshot,
+  type Meta,
+} from './store';
+
+/**
+ * Cron 分两跳：
+ *   :00 → 抓取 + 转换 + 编码「全部版」+ 写全部 KV
+ *   :02 → 从 KV 读「屏蔽版」明文，只编码这一份
+ * 拆开的原因是 Base58 编码单份约 14 ms CPU，两份 28 ms 已经远超 Workers 免费
+ * 套餐的 10 ms 预算；拆成两次调用，每次只超 40%，落在运行时的容错范围内。
+ */
+const SAFE_CRON = '2 */2 * * *';
 
 export interface Env {
   CONFIG: KVNamespace;
@@ -37,7 +60,12 @@ export default {
     const path = url.pathname.replace(/\/+$/, '') || '/';
     const isRefresh = path === '/refresh';
 
-    if (req.method !== 'GET' && req.method !== 'HEAD' && !(isRefresh && req.method === 'POST')) {
+    // /refresh 只接受 POST（GET 带 token 也能触发的写法会把刷新动作暴露给预取/爬虫）
+    if (isRefresh) {
+      if (req.method !== 'POST') {
+        return json({ error: 'method not allowed', allow: 'POST' }, 405, { allow: 'POST' });
+      }
+    } else if (req.method !== 'GET' && req.method !== 'HEAD') {
       return json({ error: 'method not allowed' }, 405);
     }
 
@@ -46,20 +74,20 @@ export default {
         case '/':
           return html(await renderIndex(env));
         case '/config.json':
-          return text(base58Encode(JSON.stringify(await loadConfig(env, true))));
+          return await subscription(env, true);
         case '/config-safe.json':
-          return text(base58Encode(JSON.stringify(await loadConfig(env, false))));
+          return await subscription(env, false);
         case '/config.txt':
-          return text(await loadTvbox(env, true));
+          return await tvbox(env, true);
         case '/config-safe.txt':
-          return text(await loadTvbox(env, false));
+          return await tvbox(env, false);
         case '/health':
           return json(await health(env));
         case '/stats':
           return json(await stats(env));
         case '/refresh': {
           const r = await manualRefresh(req, env);
-          return json(r.body, r.status);
+          return json(r.body, r.status, { 'cache-control': 'no-store' });
         }
         default:
           return json({ error: 'not found', path: url.pathname }, 404);
@@ -70,40 +98,91 @@ export default {
     }
   },
 
-  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(refresh(env, 'cron'));
+  async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    if (controller.cron === SAFE_CRON) {
+      ctx.waitUntil(encodeSafeFromKv(env));
+      return;
+    }
+    ctx.waitUntil(refresh(env, 'cron', 'full'));
   },
 } satisfies ExportedHandler<Env>;
 
-// ---------------------------------------------------------------------------
-// 配置读取（带冷启动兜底）
-// ---------------------------------------------------------------------------
-
-async function loadConfig(env: Env, full: boolean) {
-  const snap = await readSnapshot(env.CONFIG);
-  const cfg = full ? snap.configFull : snap.configSafe;
-  if (Object.keys(cfg.api_site).length > 0) return cfg;
-
-  // KV 为空：实时抓取一次
-  const result = await refresh(env, 'cold-start');
-  if (result.ok) {
-    const after = await readSnapshot(env.CONFIG);
-    return full ? after.configFull : after.configSafe;
-  }
-  return cfg;
+/** Cron 第二跳：屏蔽版明文已经在上一次调用里写好了，这里只补 Base58 编码 */
+async function encodeSafeFromKv(env: Env): Promise<void> {
+  const cfg = await readConfigJson(env.CONFIG, false);
+  if (Object.keys(cfg.api_site).length === 0) return;
+  await writeConfigB58(env.CONFIG, false, base58Encode(JSON.stringify(cfg)));
 }
 
-async function loadTvbox(env: Env, full: boolean) {
-  const snap = await readSnapshot(env.CONFIG);
-  const value = full ? snap.tvboxFull : snap.tvboxSafe;
-  if (value) return value;
+// ---------------------------------------------------------------------------
+// 订阅输出（KV 命中即返回；未命中才触发一次抓取）
+// ---------------------------------------------------------------------------
 
-  const result = await refresh(env, 'cold-start');
-  if (result.ok) {
-    const after = await readSnapshot(env.CONFIG);
-    return full ? after.tvboxFull : after.tvboxSafe;
+/** 编码哪几份产物：Cron 一次一份，冷启动只做被请求的那一份，TVBox 路径一份都不编 */
+type EncodeTarget = 'both' | 'full' | 'safe' | 'none';
+
+/** 冷启动失败后的冷却时间：上游挂了的时候别让每个请求都去打一遍上游（3 次重试 + 14s 退避） */
+const COOLDOWN_MS = 60_000;
+
+/**
+ * 冷却只在「上一次尝试是失败」时生效：上游挂了的时候别让每个请求都去打一遍
+ * 上游（3 次重试 + 14s 退避）。抓取成功会把 last_error 清空，所以正常状态下
+ * 不会误伤「刚被 /config.txt 拉过数据、紧接着访问 /config.json」这种场景。
+ */
+function coolingDown(meta: Meta): boolean {
+  if (!meta.last_error || !meta.last_attempt_at) return false;
+  const age = Date.now() - Date.parse(meta.last_attempt_at);
+  return Number.isFinite(age) && age >= 0 && age < COOLDOWN_MS;
+}
+
+function notReady(detail: string, retryAfter = 60): Response {
+  return json(
+    {
+      error: 'config not ready',
+      detail,
+      hint: '稍后重试；或检查 SOURCE_URL / Cron 是否正常',
+    },
+    503,
+    { 'retry-after': String(retryAfter), 'cache-control': 'no-store' },
+  );
+}
+
+async function subscription(env: Env, full: boolean): Promise<Response> {
+  const cached = await readConfigB58(env.CONFIG, full);
+  if (cached) return text(cached);
+
+  // 明文已经在 KV 里，只是缺 Base58（比如刚部署、或另一条路径抓过数据）：
+  // 直接就地编码，不再打一次上游。这一次调用约 14 ms CPU，属于冷启动兜底的成本。
+  const cfg = await readConfigJson(env.CONFIG, full);
+  if (Object.keys(cfg.api_site).length > 0) {
+    const encoded = base58Encode(JSON.stringify(cfg));
+    await writeConfigB58(env.CONFIG, full, encoded);
+    return text(encoded);
   }
-  return value || '（尚未抓取，请稍后重试）';
+
+  // KV 完全是空的：抓一次，只编码这一份。刚失败过就先别打上游
+  const meta = await readMeta(env.CONFIG);
+  if (coolingDown(meta)) return notReady(meta.last_error || '上次抓取刚失败，冷却中');
+
+  const result = await refresh(env, 'cold-start', full ? 'full' : 'safe');
+  const after = result.ok ? await readConfigB58(env.CONFIG, full) : null;
+  if (after) return text(after);
+
+  return notReady(result.error ?? '上游抓取失败，KV 中也没有旧数据');
+}
+
+async function tvbox(env: Env, full: boolean): Promise<Response> {
+  const cached = await readTvbox(env.CONFIG, full);
+  if (cached) return text(cached);
+
+  const meta = await readMeta(env.CONFIG);
+  if (coolingDown(meta)) return notReady(meta.last_error || '上次抓取刚失败，冷却中');
+
+  const result = await refresh(env, 'cold-start', 'none');
+  const after = result.ok ? await readTvbox(env.CONFIG, full) : null;
+  if (after) return text(after);
+
+  return notReady(result.error ?? '上游抓取失败，KV 中也没有旧数据');
 }
 
 // ---------------------------------------------------------------------------
@@ -119,7 +198,11 @@ export interface RefreshResult {
   elapsedMs: number;
 }
 
-export async function refresh(env: Env, trigger: string): Promise<RefreshResult> {
+export async function refresh(
+  env: Env,
+  trigger: string,
+  encode: EncodeTarget = 'both',
+): Promise<RefreshResult> {
   const started = Date.now();
   const timeoutMs = Number(env.FETCH_TIMEOUT ?? 30) * 1000;
   const retries = Number(env.FETCH_RETRIES ?? 3);
@@ -129,6 +212,7 @@ export async function refresh(env: Env, trigger: string): Promise<RefreshResult>
 
   if (!result.ok) {
     const error = result.error ?? 'unknown';
+    // 只写错误信息，保留下次成功时的数据继续对外服务
     await writeError(env.CONFIG, `[${trigger}] ${error}`);
     return { ok: false, siteCount: 0, safeCount: 0, error, attempts: result.attempts, elapsedMs: result.elapsedMs };
   }
@@ -139,13 +223,25 @@ export async function refresh(env: Env, trigger: string): Promise<RefreshResult>
   const tvboxFull = convertToTvbox(sites, false);
   const tvboxSafe = convertToTvbox(sites, true);
 
-  await writeSnapshot(env.CONFIG, { configFull, configSafe, tvboxFull, tvboxSafe }, {
-    site_count: Object.keys(configFull.api_site).length,
-    safe_count: Object.keys(configSafe.api_site).length,
-    last_duration_ms: Date.now() - started,
-    last_attempts: result.attempts,
-    source_url: env.SOURCE_URL,
-  });
+  // Base58 编码是这里最贵的一步（约 14 ms/份）。Cron 第一跳只编「全部版」，
+  // 第二跳才补「屏蔽版」；冷启动只编被请求的那一份；TVBox 路径一份都不编。
+  // 没算的那份传 undefined，让 writeSnapshot 跳过写入，保留 KV 里的旧值。
+  const configFullB58 =
+    encode === 'both' || encode === 'full' ? base58Encode(JSON.stringify(configFull)) : undefined;
+  const configSafeB58 =
+    encode === 'both' || encode === 'safe' ? base58Encode(JSON.stringify(configSafe)) : undefined;
+
+  await writeSnapshot(
+    env.CONFIG,
+    { configFull, configSafe, configFullB58, configSafeB58, tvboxFull, tvboxSafe },
+    {
+      site_count: Object.keys(configFull.api_site).length,
+      safe_count: Object.keys(configSafe.api_site).length,
+      last_duration_ms: Date.now() - started,
+      last_attempts: result.attempts,
+      source_url: env.SOURCE_URL,
+    },
+  );
 
   return {
     ok: true,
@@ -160,10 +256,10 @@ export async function refresh(env: Env, trigger: string): Promise<RefreshResult>
 // 页面 / 端点
 // ---------------------------------------------------------------------------
 
-// 手动刷新：POST，需要 ADMIN_TOKEN（query ?token= 或 X-Admin-Token 头）
+// 手动刷新：POST，需要 ADMIN_TOKEN（X-Admin-Token 头优先，兼容 ?token=）
 async function manualRefresh(req: Request, env: Env): Promise<{ body: Record<string, unknown>; status: number }> {
   const url = new URL(req.url);
-  const given = url.searchParams.get('token') || req.headers.get('x-admin-token') || '';
+  const given = req.headers.get('x-admin-token') || url.searchParams.get('token') || '';
   if (!env.ADMIN_TOKEN) {
     return { body: { error: 'ADMIN_TOKEN 未配置，手动刷新已禁用（Cron 仍正常运行）' }, status: 403 };
   }
@@ -171,7 +267,7 @@ async function manualRefresh(req: Request, env: Env): Promise<{ body: Record<str
     return { body: { error: 'invalid admin token' }, status: 401 };
   }
 
-  const result = await refresh(env, 'manual');
+  const result = await refresh(env, 'manual', 'both');
   return {
     status: result.ok ? 200 : 502,
     body: {
@@ -185,26 +281,45 @@ async function manualRefresh(req: Request, env: Env): Promise<{ body: Record<str
   };
 }
 
+/** 数据超过 STALE_IF_ERROR_HOURS 未更新就标记 stale，方便外部监控 */
+function staleness(meta: Meta, staleHours: number): { stale: boolean; ageSeconds: number | null } {
+  if (!meta.last_updated) return { stale: false, ageSeconds: null };
+  const age = Date.now() - Date.parse(meta.last_updated);
+  if (!Number.isFinite(age)) return { stale: false, ageSeconds: null };
+  return { stale: age > staleHours * 3600 * 1000, ageSeconds: Math.round(age / 1000) };
+}
+
 async function health(env: Env): Promise<Record<string, unknown>> {
   const meta = await readMeta(env.CONFIG);
+  const staleHours = Number(env.STALE_IF_ERROR_HOURS ?? 72);
+  const { stale, ageSeconds } = staleness(meta, staleHours);
   return {
-    status: meta.site_count > 0 ? 'ok' : 'starting',
+    status: meta.site_count === 0 ? 'starting' : stale ? 'stale' : 'ok',
     sites: meta.site_count,
     safe_sites: meta.safe_count,
     last_updated: meta.last_updated || null,
+    age_seconds: ageSeconds,
+    stale_after_hours: staleHours,
+    fetch_count: meta.fetch_count,
+    error_count: meta.error_count,
     last_error: meta.last_error || null,
   };
 }
 
 async function stats(env: Env): Promise<Record<string, unknown>> {
-  const snap = await readSnapshot(env.CONFIG);
-  const toList = (cfg: typeof snap.configFull) =>
+  // 只读需要的 3 个 key（meta + 两份明文），不再读 5 个
+  const [meta, configFull, configSafe] = await Promise.all([
+    readMeta(env.CONFIG),
+    readConfigJson(env.CONFIG, true),
+    readConfigJson(env.CONFIG, false),
+  ]);
+  const toList = (cfg: typeof configFull) =>
     Object.entries(cfg.api_site).map(([key, v]) => ({ key, name: v.name, api: v.api }));
   return {
-    ...snap.meta,
-    cache_time: snap.configFull.cache_time,
-    total_sources: toList(snap.configFull),
-    safe_sources: toList(snap.configSafe),
+    ...meta,
+    cache_time: configFull.cache_time,
+    total_sources: toList(configFull),
+    safe_sources: toList(configSafe),
   };
 }
 
@@ -214,9 +329,14 @@ function esc(s: unknown): string {
 
 async function renderIndex(env: Env): Promise<string> {
   const meta = await readMeta(env.CONFIG);
+  const staleHours = Number(env.STALE_IF_ERROR_HOURS ?? 72);
+  const { stale } = staleness(meta, staleHours);
   const errHtml = meta.last_error
     ? `<span class="err">${esc(meta.last_error)}</span>`
     : '<span class="ok">无</span>';
+  const staleHtml = stale
+    ? `<span class="err">数据已超过 ${staleHours} 小时未更新</span>`
+    : '<span class="ok">正常</span>';
 
   return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -263,8 +383,10 @@ footer{color:#9ca3af;font-size:.75rem;text-align:center;margin:1.5rem 0}
 <div class="kv">
 <span>全部站点</span><b>${meta.site_count}</b>
 <span>屏蔽版</span><b>${meta.safe_count}</b>
-<span>抓取次数</span><b>${meta.fetch_count}</b>
+<span>抓取成功</span><b>${meta.fetch_count} 次</b>
+<span>抓取失败</span><b>${meta.error_count} 次</b>
 <span>最后更新</span><b>${meta.last_updated ? esc(formatTime(meta.last_updated)) : '尚未抓取'}</b>
+<span>数据新鲜度</span>${staleHtml}
 <span>最近错误</span>${errHtml}
 </div>
 </div>
@@ -305,20 +427,24 @@ function html(body: string): Response {
   });
 }
 
-function json(data: unknown, status = 200): Response {
+function json(data: unknown, status = 200, extra: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(data, null, 2), {
     status,
     headers: {
       'content-type': 'application/json; charset=utf-8',
       'cache-control': 'no-cache',
       'access-control-allow-origin': '*',
+      ...extra,
     },
   });
 }
 
-function text(body: string, status = 200): Response {
+/**
+ * 订阅响应：Cron 每 2h 更新一次，客户端缓存 5 分钟既能挡住突发重复请求，
+ * 又不会让订阅内容滞后太久。HEAD 请求由 Workers 运行时自动丢弃 body。
+ */
+function text(body: string): Response {
   return new Response(body, {
-    status,
     headers: {
       'content-type': 'text/plain; charset=utf-8',
       'cache-control': 'public, max-age=300',
@@ -326,4 +452,3 @@ function text(body: string, status = 200): Response {
     },
   });
 }
-
