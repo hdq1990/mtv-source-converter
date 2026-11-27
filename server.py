@@ -237,6 +237,21 @@ class SubscriptionServer:
                 # 监控误判 404 路径为健康
                 self._route(True)
 
+            def _method_not_allowed(self):
+                # 不覆盖这些方法时 BaseHTTPRequestHandler 会回 501，
+                # 语义上应该是 405（与 Workers 版对齐）
+                self._send_json(
+                    {"error": "method not allowed", "allow": "GET, HEAD"},
+                    405,
+                    {"Allow": "GET, HEAD"},
+                )
+
+            do_POST = _method_not_allowed
+            do_PUT = _method_not_allowed
+            do_DELETE = _method_not_allowed
+            do_PATCH = _method_not_allowed
+            do_OPTIONS = _method_not_allowed
+
             # ---- 路由处理 ----
 
             def _handle_index(self, head_only=False):
