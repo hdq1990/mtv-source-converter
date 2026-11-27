@@ -16,11 +16,13 @@ HTTP 订阅服务
 
 import html
 import json
+import os
 import threading
 import time
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
 from config import HTTP_HOST, HTTP_PORT, CACHE_TIME, STALE_IF_ERROR_HOURS
+from config import PROBE_ENABLED, PROBE_FAIL_THRESHOLD, PROBE_STATE_FILE, EXTRA_SOURCES
 
 # Base58 字符集（Bitcoin 标准）
 BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
@@ -65,8 +67,44 @@ class ConfigStore:
         self._safe_count = 0
         self._last_error = ""
         self._last_duration_ms = 0
+        # 探测状态：{domain: {ok, fails, soft, code, detail, ms, last_at}}
+        self._probe = {}
+        self._probe_updated_at = ""
+        self._source_stats = {}
+        self._filtered_count = 0
+        self._load_probe_state()
 
-    def update(self, config_full, tvbox_full, config_safe, tvbox_safe, duration_ms=0):
+    # ---- 探测状态持久化（跨重启保留「连续失败几次」的累积）----
+
+    def _load_probe_state(self):
+        if not PROBE_STATE_FILE:
+            return
+        try:
+            with open(PROBE_STATE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict) and isinstance(data.get("entries"), dict):
+                self._probe = data["entries"]
+                self._probe_updated_at = data.get("updated_at", "")
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            print(f"  ⚠️ 读取探测状态失败（忽略）: {e}")
+
+    def _save_probe_state(self):
+        if not PROBE_STATE_FILE:
+            return
+        try:
+            os.makedirs(os.path.dirname(PROBE_STATE_FILE), exist_ok=True)
+            tmp = PROBE_STATE_FILE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"updated_at": self._probe_updated_at,
+                           "entries": self._probe}, f, ensure_ascii=False)
+            os.replace(tmp, PROBE_STATE_FILE)
+        except Exception as e:
+            print(f"  ⚠️ 写入探测状态失败（忽略）: {e}")
+
+    def update(self, config_full, tvbox_full, config_safe, tvbox_safe, duration_ms=0,
+               source_stats=None, filtered_count=0):
         # Base58 编码只在数据更新时做一次（约 20~40ms），请求路径直接取字符串，
         # 避免每次订阅请求都重新编码一遍。
         # 序列化必须用紧凑格式（无缩进、无空格），否则和 Workers 版
@@ -91,6 +129,96 @@ class ConfigStore:
             self._safe_count = len(config_safe.get("api_site", {}))
             self._last_error = ""
             self._last_duration_ms = duration_ms
+            self._source_stats = source_stats or {}
+            self._filtered_count = filtered_count
+
+    # ---- 探测状态 ----
+
+    def probe_fails(self, domain):
+        with self._lock:
+            return (self._probe.get(domain) or {}).get("fails", 0)
+
+    def probe_last_at(self, domain):
+        with self._lock:
+            return (self._probe.get(domain) or {}).get("last_at", "")
+
+    def apply_probe(self, outcomes, all_domains=None):
+        """
+        写入一批探测结果。outcomes: {domain: {ok, code, detail, ms, weight}}
+
+        只有 weight=hard 的失败才累计 fails（可能被剔除）；weight=soft
+        （超时/连接失败/5xx）单独记在 soft 里，只用于展示 —— 探测端自己网络
+        不通时会把大量好源打成红的，直接拿来剔除等于误杀。
+
+        返回汇总报告。
+        """
+        now = time.strftime("%Y-%m-%d %H:%M:%S")
+        alive = hard_failed = soft_failed = 0
+        with self._lock:
+            for domain, r in outcomes.items():
+                prev = self._probe.get(domain) or {}
+                hard = (not r.get("ok")) and r.get("weight") == "hard"
+                soft = (not r.get("ok")) and r.get("weight") != "hard"
+                self._probe[domain] = {
+                    "ok": bool(r.get("ok")),
+                    "fails": 0 if r.get("ok") else prev.get("fails", 0) + (1 if hard else 0),
+                    "soft": 0 if r.get("ok") else prev.get("soft", 0) + (1 if soft else 0),
+                    "code": r.get("code", ""),
+                    "detail": str(r.get("detail", ""))[:120],
+                    "ms": int(r.get("ms", 0)),
+                    "last_at": now,
+                }
+                if r.get("ok"):
+                    alive += 1
+                elif hard:
+                    hard_failed += 1
+                else:
+                    soft_failed += 1
+            self._probe_updated_at = now
+
+            domains = all_domains if all_domains is not None else set(self._probe)
+            never = sum(1 for d in domains if d not in self._probe)
+            pruned = sum(1 for d in domains
+                         if (self._probe.get(d) or {}).get("fails", 0) >= PROBE_FAIL_THRESHOLD)
+
+        self._save_probe_state()
+        return {
+            "tested": len(outcomes),
+            "alive": alive,
+            "hard_failed": hard_failed,
+            "soft_failed": soft_failed,
+            "never_tested": never,
+            "pruned": pruned,
+        }
+
+    def get_probe_report(self):
+        """给 /sources 用的探测明细"""
+        with self._lock:
+            entries = dict(self._probe)
+            updated = self._probe_updated_at
+        rows = []
+        for domain, e in sorted(entries.items()):
+            if e["ok"]:
+                state = "alive"
+            elif e["fails"] >= PROBE_FAIL_THRESHOLD:
+                state = "dead"
+            elif e.get("code") in ("network", "timeout"):
+                # 探测端自己打不通，不能断定源坏了
+                state = "unreachable"
+            else:
+                state = "flaky"
+            rows.append({"domain": domain, "state": state, **{
+                k: e.get(k) for k in ("ok", "fails", "soft", "code", "detail", "ms", "last_at")
+            }})
+        counts = {"alive": 0, "flaky": 0, "unreachable": 0, "dead": 0, "untested": 0}
+        for r in rows:
+            counts[r["state"]] += 1
+        return {
+            "probe_updated_at": updated or None,
+            "fail_threshold": PROBE_FAIL_THRESHOLD,
+            "counts": counts,
+            "sites": rows,
+        }
 
     def mark_error(self, error_msg):
         with self._lock:
@@ -137,6 +265,8 @@ class ConfigStore:
                 "status": status,
                 "site_count": self._site_count,
                 "safe_count": self._safe_count,
+                "filtered_count": self._filtered_count,
+                "source_stats": self._source_stats,
                 "fetch_count": self._fetch_count,
                 "error_count": self._error_count,
                 "last_updated": self._last_updated,
@@ -225,6 +355,8 @@ class SubscriptionServer:
                     self._handle_health(head_only)
                 elif path == "/stats":
                     self._handle_stats(head_only)
+                elif path == "/sources":
+                    self._handle_sources(head_only)
                 else:
                     self._send_json({"error": "not found", "path": self.path}, 404,
                                     head_only=head_only)
@@ -313,6 +445,7 @@ a{{color:#2563eb;text-decoration:none}}a:hover{{text-decoration:underline}}
 <div class="card">
 <h3>运行状态</h3>
 <p>全部站点: <b>{meta['site_count']}</b> · 屏蔽版: <b>{meta['safe_count']}</b></p>
+<p>探测剔除: <b>{meta['filtered_count']}</b> 个死源 · 数据源: <b>{len(meta['source_stats'])}</b> 个</p>
 <p>抓取成功: <b>{meta['fetch_count']}</b> 次 · 失败: <b>{meta['error_count']}</b> 次</p>
 <p>最后更新: <b>{meta['last_updated'] or '尚未抓取'}</b></p>
 <p>数据新鲜度: {stale_html}</p>
@@ -327,6 +460,7 @@ a{{color:#2563eb;text-decoration:none}}a:hover{{text-decoration:underline}}
 <li><a href="/config-safe.txt">GET /config-safe.txt</a> - TVBox 屏蔽版格式</li>
 <li><a href="/health">GET /health</a> - 健康检查</li>
 <li><a href="/stats">GET /stats</a> - 统计信息</li>
+<li><a href="/sources">GET /sources</a> - 每个源的探测结果</li>
 </ul>
 </div>
 </body>
@@ -367,12 +501,51 @@ a{{color:#2563eb;text-decoration:none}}a:hover{{text-decoration:underline}}
                     "status": meta["status"],
                     "sites": meta["site_count"],
                     "safe_sites": meta["safe_count"],
+                    "filtered": meta["filtered_count"],
+                    "sources": meta["source_stats"],
                     "last_updated": meta["last_updated"] or None,
                     "age_seconds": meta["age_seconds"],
                     "stale_after_hours": meta["stale_after_hours"],
                     "fetch_count": meta["fetch_count"],
                     "error_count": meta["error_count"],
                     "last_error": meta["last_error"] or None,
+                }, head_only=head_only)
+
+            def _handle_sources(self, head_only=False):
+                """每个源的探测结果，方便判断哪个上游在拖后腿"""
+                meta = store.get_meta()
+                report = store.get_probe_report()
+                config_full = store.get_config_full()
+                # 把探测结果按站点补全（含名字和 api）
+                by_domain = {r["domain"]: r for r in report["sites"]}
+                rows = []
+                for key, v in config_full.get("api_site", {}).items():
+                    domain = ""
+                    try:
+                        from urllib.parse import urlparse as _up
+                        domain = (_up(v.get("api") or "").netloc or "").lower().replace("www.", "")
+                    except ValueError:
+                        pass
+                    e = by_domain.get(domain)
+                    rows.append({
+                        "key": key,
+                        "domain": domain,
+                        "name": v.get("name"),
+                        "api": v.get("api"),
+                        "state": (e or {}).get("state", "untested"),
+                        "fails": (e or {}).get("fails", 0),
+                        "code": (e or {}).get("code"),
+                        "detail": (e or {}).get("detail"),
+                        "last_ms": (e or {}).get("ms"),
+                        "last_probe": (e or {}).get("last_at"),
+                    })
+                self._send_json({
+                    **report,
+                    "probe_enabled": PROBE_ENABLED,
+                    "extra_sources": EXTRA_SOURCES,
+                    "source_stats": meta["source_stats"],
+                    "filtered_from_output": meta["filtered_count"],
+                    "sites": rows,
                 }, head_only=head_only)
 
             def _handle_stats(self, head_only=False):

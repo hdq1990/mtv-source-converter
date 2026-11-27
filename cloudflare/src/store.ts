@@ -29,11 +29,16 @@ export const KEYS = {
   tvboxFull: 'tvbox_full',
   tvboxSafe: 'tvbox_safe',
   meta: 'meta',
+  probe: 'probe',
 } as const;
 
 export interface Meta {
   site_count: number;
   safe_count: number;
+  /** 被可用性探测剔除掉的源数量 */
+  filtered_count: number;
+  /** 每个上游贡献了多少站、去重后留下多少 */
+  source_stats: Record<string, { fetched: number; kept: number }>;
   fetch_count: number;
   error_count: number;
   last_updated: string; // ISO 8601
@@ -47,6 +52,8 @@ export interface Meta {
 export const EMPTY_META: Meta = {
   site_count: 0,
   safe_count: 0,
+  filtered_count: 0,
+  source_stats: {},
   fetch_count: 0,
   error_count: 0,
   last_updated: '',
@@ -145,4 +152,42 @@ export async function writeError(kv: KVNamespace, error: string): Promise<void> 
     last_error: error,
   };
   await kv.put(KEYS.meta, JSON.stringify(meta));
+}
+
+// ---------------------------------------------------------------------------
+// 源可用性探测状态
+// ---------------------------------------------------------------------------
+
+export interface ProbeEntry {
+  ok: boolean;
+  /** 硬证据失败次数（4xx / RSS 接口 / 明确不兼容），超过阈值就从输出剔除 */
+  fails: number;
+  /** 软证据失败次数（超时 / 连接失败 / 5xx），只用于展示，不参与剔除 */
+  soft: number;
+  code: string;
+  detail: string;
+  ms: number;
+  last_at: string;
+}
+
+export interface ProbeState {
+  updated_at: string;
+  /** 轮转游标：下次从有序站点列表的第几个开始测 */
+  cursor: number;
+  /** key = 站点域名 */
+  entries: Record<string, ProbeEntry>;
+}
+
+export const EMPTY_PROBE: ProbeState = { updated_at: '', cursor: 0, entries: {} };
+
+export async function readProbe(kv: KVNamespace): Promise<ProbeState> {
+  const s = await kv.get<ProbeState>(KEYS.probe, 'json');
+  if (!s || typeof s !== 'object' || typeof s.entries !== 'object' || s.entries === null) {
+    return { ...EMPTY_PROBE, entries: {} };
+  }
+  return { updated_at: s.updated_at ?? '', cursor: s.cursor ?? 0, entries: s.entries };
+}
+
+export async function writeProbe(kv: KVNamespace, state: ProbeState): Promise<void> {
+  await kv.put(KEYS.probe, JSON.stringify(state));
 }

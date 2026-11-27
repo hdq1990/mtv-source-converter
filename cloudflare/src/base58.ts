@@ -74,3 +74,44 @@ export function base58Encode(input: string | Uint8Array): string {
 
   return (zeros > 0 ? '1'.repeat(zeros) : '') + blocks.join('');
 }
+
+// 解码用的字符 → 索引表
+const INDEX: Record<string, number> = {};
+for (let i = 0; i < ALPHABET.length; i++) INDEX[ALPHABET[i]] = i;
+
+/**
+ * Base58 解码（把订阅字符串还原成 JSON 字节）。
+ *
+ * 和编码一样按 8 字符一组累加：58^8 < 2^53，组内用 Number 算不丢精度，
+ * 外层每 8 个字符才做一次 BigInt 乘法，比逐字符 `num = num * 58n + d` 快一个量级。
+ */
+export function base58Decode(input: string): Uint8Array {
+  const s = input.trim();
+  if (s.length === 0) return new Uint8Array(0);
+
+  let pad = 0;
+  while (pad < s.length && s[pad] === '1') pad++;
+
+  let num = 0n;
+  for (let i = pad; i < s.length; i += GROUP) {
+    const chunk = s.slice(i, Math.min(i + GROUP, s.length));
+    let v = 0;
+    for (let k = 0; k < chunk.length; k++) {
+      const d = INDEX[chunk[k]];
+      if (d === undefined) throw new Error(`非法 base58 字符：${chunk[k]}`);
+      v = v * 58 + d;
+    }
+    num = num * 58n ** BigInt(chunk.length) + BigInt(v);
+  }
+
+  const body: number[] = [];
+  while (num > 0n) {
+    body.push(Number(num & 0xffn));
+    num >>= 8n;
+  }
+  body.reverse();
+
+  const out = new Uint8Array(pad + body.length);
+  for (let i = 0; i < body.length; i++) out[pad + i] = body[i];
+  return out;
+}

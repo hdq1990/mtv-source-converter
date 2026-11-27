@@ -5,22 +5,25 @@
 ## 架构
 
 ```
-Cron :00 （每 2h）──► fetch ziyuanzu.com ──► 转换 ──► Base58（全部版）
-                                                    └─► KV：5 个 key
-Cron :02 （每 2h）──► 读 KV 里的屏蔽版明文 ──► Base58 ──► KV：+1 个 key
-                                                              │
-GET /config.json ─────────────────────────────────────────────┴──► 直接读 KV 返回（CPU < 1 ms）
+Cron 北京 13:00 / 次日 01:00 ──► 抓主源 + 所有 EXTRA_SOURCES
+                              ──► 按域名合并去重
+                              ──► 剔除探测判定为死源的站
+                              ──► 转换 ──► Base58（全部版）──► KV
+                              ──► 探测下一批（每次 PROBE_LIMIT 个，轮流覆盖）
+Cron +2 分钟 ──► 读 KV 里的屏蔽版明文 ──► Base58 ──► KV（只补这一份）
+                              │
+GET /config.json ─────────────┴──► 直接读 KV 返回（CPU < 1 ms）
 GET /config.json（KV 为空）──► 请求内实时抓取 + 只编码这一份（冷启动兜底）
 ```
 
 | 组件 | 作用 | 免费额度 |
 |---|---|---|
-| Workers | 路由 + 抓取 + 转换 + 编码 | 10 万请求/天，**10 ms CPU/次** |
-| KV | 6 份产物 + 1 份元数据 | 10 万读 / 1000 写 每天 |
-| Cron Triggers | 定时触发（两个表达式） | 免费，5 个/账号 |
+| Workers | 路由 + 抓取 + 合并 + 探测 + 编码 | 10 万请求/天，**10 ms CPU/次**、50 subrequest/次 |
+| KV | 6 份产物 + 元数据 + 探测状态 | 10 万读 / 1000 写 每天 |
+| Cron Triggers | 定时触发（4 个表达式：抓取 ×2 + 补编码 ×2） | 免费，5 个/账号 |
 | Observability | 日志 | 免费 20 万事件/天 |
 
-订阅场景每天几十次请求，请求数和 KV 读额度绰绰有余。真正需要留意的是 **CPU 时间**，见下一节。
+订阅场景每天几十次请求，请求数和 KV 读额度绰绰有余。真正需要留意的是 **CPU 时间**和 **subrequest 数**，见下面两节。
 
 ## ⚠️ 关于 CPU 时间：为什么编码放在 Cron 里
 
@@ -195,14 +198,16 @@ curl -X POST -H "X-Admin-Token: 你的口令" https://<你的域名>/refresh
 
 | 端点 | 内容 | 格式 |
 |---|---|---|
-| `GET /config.json` | 全部 73 站 | Base58 编码 JSON（MoonTVPlus `CONFIG_SUBSCRIPTION_URL` 用） |
-| `GET /config-safe.json` | 屏蔽成人 58 站 | Base58 编码 JSON |
-| `GET /config.txt` | 全部 73 站 | TVBox TXT |
-| `GET /config-safe.txt` | 屏蔽成人 58 站 | TVBox TXT |
-| `GET /` | 状态页 | HTML |
+| `GET /config.json` | 全部站点（默认单源 73、多源合并后 101） | Base58 编码 JSON（MoonTVPlus `CONFIG_SUBSCRIPTION_URL` 用） |
+| `GET /config-safe.json` | 屏蔽成人版 | Base58 编码 JSON |
+| `GET /config.txt` | 全部站点 | TVBox TXT |
+| `GET /config-safe.txt` | 屏蔽成人版 | TVBox TXT |
+| `GET /` | 状态页（含数据源、探测状态） | HTML |
 | `GET /health` | 健康检查 | JSON |
-| `GET /stats` | 统计 + 全部源 | JSON |
+| `GET /stats` | 统计 + 全部源 + 探测摘要 | JSON |
+| `GET /sources` | 每个源的探测结果明细 | JSON |
 | `POST /refresh` | 手动刷新（需 `ADMIN_TOKEN`） | JSON |
+| `POST /probe` | 手动探测一批源（需 `ADMIN_TOKEN`） | JSON |
 
 MoonTVPlus 里填（国内请用自定义域名，`workers.dev` 不通）：
 
@@ -228,32 +233,106 @@ CONFIG_SUBSCRIPTION_URL=https://mtv.your-domain.com/config.json
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `SOURCE_URL` | `https://www.ziyuanzu.com/download/ziyuanzu-cms-interfaces.json` | 上游采集站清单 |
+| `SOURCE_URL` | `https://www.ziyuanzu.com/download/ziyuanzu-cms-interfaces.json` | 主上游采集站清单 |
+| `EXTRA_SOURCES` | 空 | 逗号分隔的额外源，见下面「多源合并」 |
 | `CACHE_TIME` | `7200` | 写入 MoonTVPlus 配置的 `cache_time` |
 | `FETCH_TIMEOUT` | `30` | 抓取超时（秒） |
-| `FETCH_RETRIES` | `3` | 抓取重试次数（指数退避 2s/4s/8s；4xx、非 JSON、空数组直接放弃，不浪费退避时间） |
+| `FETCH_RETRIES` | `3` | 抓取重试次数（指数退避 2s/4s/8s；4xx、格式不对、空数组直接放弃，不浪费退避时间） |
 | `STALE_IF_ERROR_HOURS` | `72` | 数据超过这么多小时没更新，`/health` 的 `status` 变成 `stale` |
+| `PROBE_ENABLED` | `true` | 是否开启源可用性探测 |
+| `PROBE_LIMIT` | `25` | 每次调用最多探测多少个源（受 50 subrequest/请求限制） |
+| `PROBE_TIMEOUT` | `8` | 单个源探测超时（秒） |
+| `PROBE_FAIL_THRESHOLD` | `2` | 连续几次「硬证据」失败就从输出剔除 |
 
 改完重新 `npm run deploy` 生效。敏感值用 `wrangler secret put`，不要写进 `[vars]`。
+
+## 多源合并
+
+`EXTRA_SOURCES` 接受逗号分隔的 URL，三种格式自动识别：
+
+| 格式 | 样子 | 例子 |
+|---|---|---|
+| 裸采集站数组 | `[{"name","api",...}]` | ziyuanzu.com 的清单 |
+| MoonTVPlus 明文 JSON | `{"cache_time":7200,"api_site":{...}}` | `https://pz.v88.qzz.io?format=0&source=full` |
+| Base58 订阅串 | 纯 base58 字符 | `https://raw.githubusercontent.com/hafrey1/LunaTV-config/refs/heads/main/LunaTV-config.txt` |
+
+```toml
+[vars]
+SOURCE_URL = "https://www.ziyuanzu.com/download/ziyuanzu-cms-interfaces.json"
+EXTRA_SOURCES = "https://pz.v88.qzz.io?format=0&source=full"
+```
+
+合并规则：
+
+- **按 API 域名去重**，`main`（主源）优先级最高，`extra1/2/3…` 按配置顺序
+- 同一个站同时提供 `.../vod` 和 `.../vod/`、或 http/https 混用的，算同一个站
+- 只有主源失败才算整次刷新失败；某个额外源挂了只丢它那部分站，服务照常
+
+`/health` 里的 `sources` 会显示每个源贡献了多少站：
+
+```json
+"main":   {"fetched": 73, "kept": 73},
+"extra1": {"fetched": 69, "kept": 28}
+```
+
+## 源可用性探测（剔除死源）
+
+每次 Cron 抓取完，会顺手探测一批源的 API 是否真能用，结果存 KV，下次发布时把死源剔掉。
+
+**判据分两级**，这是关键设计：
+
+| 证据 | 什么情况 | 影响 |
+|---|---|---|
+| **硬证据** | HTTP 4xx、返回 RSS/XML（MoonTVPlus 的 `type=0` 只吃苹果 CMS JSON） | 计入 `fails`，连续 `PROBE_FAIL_THRESHOLD`（默认 2）次就从输出剔除 |
+| **软证据** | 超时、连接被重置、TLS 错误、5xx、返回错误页 HTML | 只记在 `soft` 里给 `/sources` 看，**永不剔除** |
+
+为什么分两级：探测跑在 Cloudflare 边缘（海外），但如果你本地 `wrangler dev` 跑、或者源对某些地区不友好，
+一半的源会因为网络问题集体报红。用不分级的结果去剔除，等于把好源成片误杀。实测 101 个源里，
+硬证据失败只有 1–2 个（都是真的返回 RSS），软证据失败有 45–50 个 —— 差别就在这。
+
+探测数量受 **50 subrequest/请求**限制：每次 `PROBE_LIMIT`（默认 25）个，
+排序是「从没测过的优先，其次上次测的最早的」，天然轮转覆盖全部源。
+100 个源大约 4 次 Cron（2 天）全覆盖。想立刻跑完可以手动连点几次：
+
+```bash
+curl -X POST -H "X-Admin-Token: 你的口令" https://<你的域名>/probe
+```
+
+看探测明细：`GET /sources`，或者 `GET /stats` 里的 `probe` 摘要。
+
+```json
+"counts": {"alive": 50, "flaky": 0, "unreachable": 45, "dead": 1, "untested": 5}
+```
+
+- `alive` — 通
+- `flaky` — 硬证据失败但还没到剔除阈值
+- `unreachable` — 只有网络类失败，探测端打不通，不代表源坏了
+- `dead` — 达到阈值，已从 `/config.json` 里剔除
 
 ## Cron 调度
 
 ```toml
 [triggers]
-crons = ["0 */2 * * *", "2 */2 * * *"]   # UTC，每 2 小时的 :00 和 :02
+crons = ["0 5 * * *", "0 17 * * *", "2 5 * * *", "2 17 * * *"]
 ```
 
-- `:00` 抓上游 + 转换 + 编码「全部版」+ 写 KV
-- `:02` 从 KV 读「屏蔽版」明文，只补 Base58 编码
+全部是 UTC —— Cron 表达式本身不支持时区，用北京时间反推时要 -8 小时：
 
-上游每 2 小时更新一次，这个频率刚好。
+| 表达式 | UTC | 北京时间 | 干什么 |
+|---|---|---|---|
+| `0 5 * * *` | 05:00 | **13:00** | 抓取 + 合并 + 剔除死源 + 编码全部版 |
+| `0 17 * * *` | 17:00 | **次日 01:00** | 同上 |
+| `2 5 * * *` | 05:02 | 13:02 | 只补屏蔽版 Base58 |
+| `2 17 * * *` | 17:02 | 次日 01:02 | 只补屏蔽版 Base58 |
+
+想改成别的整点，注意 `0 H * * *` 里的 `H = 北京时间 - 8`（为负就 +24）。
 
 本地调试 Cron：
 
 ```bash
 npx wrangler dev --test-scheduled
-curl "http://localhost:8787/__scheduled?cron=0+*/2+*+*+*"   # 走 :00 那条
-curl "http://localhost:8787/__scheduled?cron=2+*/2+*+*+*"   # 走 :02 那条
+curl "http://localhost:8787/__scheduled?cron=0+5+*+*+*"    # 模拟 13:00 抓取
+curl "http://localhost:8787/__scheduled?cron=2+5+*+*+*"    # 模拟 13:02 补编码
 ```
 
 ## 本地开发

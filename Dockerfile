@@ -12,8 +12,9 @@ ENV PYTHONUNBUFFERED=1 \
 # 只复制运行需要的文件，避免把 __pycache__ / README 之类打进镜像
 COPY main.py fetcher.py converter.py server.py config.py ./
 
-# 以非 root 运行
+# 以非 root 运行；/app/data 用来存探测状态（跨重启保留「连续失败几次」的累积）
 RUN useradd --create-home --uid 10001 appuser \
+    && mkdir -p /app/data \
     && chown -R appuser:appuser /app
 USER appuser
 

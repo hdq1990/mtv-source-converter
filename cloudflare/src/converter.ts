@@ -44,6 +44,62 @@ function hostOf(api: string): string {
   }
 }
 
+/** 对外暴露：合并去重、探测、统计都要按域名识别同一个站 */
+export function siteDomain(site: { api?: string; apiUrl?: string }): string {
+  return hostOf(site.api || site.apiUrl || '').replace(/^www\./, '');
+}
+
+/** 带来源标签的站点（合并后每个站知道自己从哪个上游来的） */
+export interface SourcedSite extends CmsSite {
+  source: string;
+  domain: string;
+}
+
+export interface SourceGroup {
+  /** 来源标签，写进 /stats 方便看每个源贡献了多少站 */
+  label: string;
+  sites: CmsSite[];
+}
+
+/**
+ * 多源合并：按 API 域名去重，先出现的赢（主源优先级最高，extras 按配置顺序）。
+ *
+ * 去重必须按域名而不是 URL：同一个采集站经常同时提供
+ * `https://x.com/api.php/provide/vod` 和 `.../vod/`（尾斜杠差异），
+ * 也有 http/https 混用的，直接比字符串会把同一个站算成两个。
+ */
+export function mergeSites(groups: SourceGroup[]): SourcedSite[] {
+  const seen = new Set<string>();
+  const out: SourcedSite[] = [];
+
+  for (const group of groups) {
+    for (const site of group.sites) {
+      const api = site.api || site.apiUrl || '';
+      if (!/^https?:\/\//i.test(api)) continue; // 丢掉没有 API 地址的脏数据
+
+      const domain = siteDomain(site);
+      if (!domain) continue;
+      if (seen.has(domain)) continue;
+
+      seen.add(domain);
+      out.push({ ...site, api, source: group.label, domain });
+    }
+  }
+
+  return out;
+}
+
+/** 每个源贡献了多少站、有多少被去重掉 */
+export function sourceSummary(groups: SourceGroup[], merged: SourcedSite[]): Record<string, { fetched: number; kept: number }> {
+  const count: Record<string, number> = {};
+  for (const s of merged) count[s.source] = (count[s.source] ?? 0) + 1;
+  const out: Record<string, { fetched: number; kept: number }> = {};
+  for (const g of groups) {
+    out[g.label] = { fetched: g.sites.length, kept: count[g.label] ?? 0 };
+  }
+  return out;
+}
+
 /** 从站点 API 域名生成唯一的小写字母/数字 key（与 Python make_key 等价） */
 export function makeKey(site: CmsSite, usedKeys: Set<string>): string {
   const api = site.api || site.apiUrl || '';

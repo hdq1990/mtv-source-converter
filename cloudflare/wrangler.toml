@@ -16,12 +16,11 @@ routes = [
 enabled = true
 
 [triggers]
-# 每 2 小时两跳：
-#   第 0 分 → 抓取 + 转换 + 编码「全部版」+ 写全部 KV
-#   第 2 分 → 只给「屏蔽版」补 Base58 编码（从 KV 读明文，不再打上游）
-# 拆开是为了把单次调用的 Base58 编码 CPU 从 28 ms 压到 14 ms，
-# 尽量贴合 Workers 免费套餐 10 ms/次 的 CPU 预算。
-crons = ["0 */2 * * *", "2 */2 * * *"]
+# 每天两次抓取，全部 UTC（Cloudflare 免费账号全账号只有 5 个 cron trigger，
+# 其余 Worker 已占用 4 个，所以这里把两个时刻塞进同一个表达式的小时列表）：
+#   0 5,17 * * *  →  北京 13:00 和 次日 01:00
+# 一次调用里做完抓取 + 合并 + 剔除死源 + 两份 Base58 编码。
+crons = ["0 5,17 * * *"]
 
 [[kv_namespaces]]
 binding = "CONFIG"
@@ -30,7 +29,15 @@ preview_id = "9b99300f2b034795ba6c7da378cceff8"
 
 [vars]
 SOURCE_URL = "https://www.ziyuanzu.com/download/ziyuanzu-cms-interfaces.json"
+# 逗号分隔的额外源，自动识别三种格式：裸采集站数组 / MoonTVPlus 明文 JSON / Base58 订阅串。
+# 这里用明文 JSON（最省 CPU）；换成自己的源或者 raw base58 直链也能吃。
+EXTRA_SOURCES = "https://pz.v88.qzz.io?format=0&source=full"
 CACHE_TIME = "7200"
 FETCH_TIMEOUT = "30"
 FETCH_RETRIES = "3"
 STALE_IF_ERROR_HOURS = "72"
+# 源可用性探测：每次调用测 PROBE_LIMIT 个，连续失败 PROBE_FAIL_THRESHOLD 次就从输出里剔除
+PROBE_ENABLED = "true"
+PROBE_LIMIT = "25"
+PROBE_TIMEOUT = "8"
+PROBE_FAIL_THRESHOLD = "2"

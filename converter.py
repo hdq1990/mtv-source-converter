@@ -29,6 +29,58 @@ ADULT_DOMAIN_KEYWORDS = [
 ]
 
 
+def site_domain(site):
+    """从站点 API 地址取出域名（合并去重、探测、统计都按域名识别同一个站）"""
+    api = site.get("api") or site.get("apiUrl") or ""
+    if not api:
+        return ""
+    try:
+        return urlparse(api).netloc.lower().replace("www.", "")
+    except ValueError:
+        return ""
+
+
+def merge_sites(groups):
+    """
+    多源合并：按 API 域名去重，先出现的赢（主源优先级最高，附加源按配置顺序）。
+
+    groups: [(label, sites), ...]
+    返回: list[dict]，每项额外带 source（来自哪个源）和 domain
+
+    去重必须按域名而不是 URL：同一个采集站经常同时提供
+    `https://x.com/api.php/provide/vod` 和 `.../vod/`（尾斜杠差异），
+    也有 http/https 混用的，直接比字符串会把同一个站算成两个。
+    """
+    seen = set()
+    out = []
+    for label, sites in groups:
+        for site in sites:
+            api = site.get("api") or site.get("apiUrl") or ""
+            if not re.match(r"^https?://", api, re.I):
+                continue  # 丢掉没有 API 地址的脏数据
+            domain = site_domain(site)
+            if not domain or domain in seen:
+                continue
+            seen.add(domain)
+            merged = dict(site)
+            merged["api"] = api
+            merged["source"] = label
+            merged["domain"] = domain
+            out.append(merged)
+    return out
+
+
+def source_summary(groups, merged):
+    """每个源贡献了多少站、去重后留下多少"""
+    kept = {}
+    for s in merged:
+        kept[s["source"]] = kept.get(s["source"], 0) + 1
+    return {
+        label: {"fetched": len(sites), "kept": kept.get(label, 0)}
+        for label, sites in groups
+    }
+
+
 def make_key(site, used_keys):
     """
     从站点 API 域名生成唯一的小写字母/数字 key

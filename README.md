@@ -4,12 +4,14 @@
 
 ## ✨ 功能特性
 
-- ⏰ **定时抓取** — 默认每 2 小时从 ziyuanzu.com 拉取最新采集站清单
+- ⏰ **每天两次抓取** — 北京时间 01:00 和 13:00（可配），不占带宽也不至于太旧
+- 🔗 **多源合并** — 主源 + 任意多个额外源（裸数组 / MoonTVPlus JSON / Base58 订阅串自动识别），按域名去重
+- 🩺 **死源剔除** — 每次抓取顺手探测一批源的 API，连续硬失败（4xx / 返回 RSS 而非苹果 CMS JSON）就自动从输出里剔掉
 - 🔄 **自动转换** — 苹果 CMS V10 接口直接转换为 MoonTVPlus `api_site` 格式
-- 📡 **双版本订阅** — 提供全部站点（73个）和屏蔽成人版（58个）两个订阅地址
+- 📡 **双版本订阅** — 提供全部站点和屏蔽成人版两个订阅地址
 - 🐳 **Docker 运行** — Python 标准库实现，镜像仅 ~50MB
 - ⚡ **Cloudflare Workers** — TypeScript 实现，**免费套餐即可部署**，KV + Cron，无需服务器
-- 📊 **状态页面** — 内置 Web 面板查看采集站数量、抓取次数、最后更新时间
+- 📊 **状态页面** — 内置 Web 面板查看站点数、数据源贡献、探测状态、抓取次数
 - 🔁 **自动重试** — 抓取失败时指数退避重试，服务不中断
 - 🧊 **冷启动兜底** — KV 为空时在请求内实时抓取并回写，首个请求也不会空手而归
 - 🩺 **健康检查带陈旧判定** — 数据超过 72 小时未更新，`/health` 返回 `status: stale`
@@ -81,27 +83,35 @@ python main.py --once
 
 | 变量名 | 默认值 | 说明 |
 |--------|--------|------|
-| `SOURCE_URL` | `https://www.ziyuanzu.com/download/ziyuanzu-cms-interfaces.json` | 采集站 JSON 下载地址 |
-| `FETCH_INTERVAL` | `7200` | 定时抓取间隔（秒，仅 Python 版；Workers 用 Cron 表达式） |
+| `SOURCE_URL` | `https://www.ziyuanzu.com/download/ziyuanzu-cms-interfaces.json` | 主上游采集站清单 |
+| `EXTRA_SOURCES` | 空 | 逗号分隔的额外源，自动识别裸数组 / MoonTVPlus JSON / Base58 订阅串 |
+| `FETCH_HOURS` | `1,13` | 每天抓取的整点（本地时区，Python 版；Workers 用 Cron 表达式） |
+| `FETCH_INTERVAL` | `0` | 设成正数则按固定间隔跑（秒），覆盖 `FETCH_HOURS`（Python 版） |
 | `HTTP_PORT` | `8080` | HTTP 服务监听端口（仅 Python 版） |
 | `CACHE_TIME` | `7200` | MoonTVPlus 配置中的 cache_time（秒） |
 | `FETCH_TIMEOUT` | `30` | 抓取请求超时（秒） |
-| `FETCH_RETRIES` | `3` | 抓取失败重试次数（指数退避 2s/4s/8s；数据格式错误不重试） |
+| `FETCH_RETRIES` | `3` | 抓取失败重试次数（指数退避 2s/4s/8s；格式错误不重试） |
 | `STALE_IF_ERROR_HOURS` | `72` | 数据超过这么多小时没更新，`/health` 判定为 `stale` |
-| `ADMIN_TOKEN` | 空 | 仅 Workers 版：`POST /refresh` 的鉴权口令，留空则禁用该端点 |
+| `PROBE_ENABLED` | `true` | 是否开启源可用性探测 |
+| `PROBE_LIMIT` | `0`（Python）/ `25`（Workers） | 每次最多探测多少个源；Workers 受 50 subrequest/请求限制 |
+| `PROBE_TIMEOUT` | `8` | 单个源探测超时（秒） |
+| `PROBE_FAIL_THRESHOLD` | `2` | 连续几次硬失败就从输出剔除 |
+| `ADMIN_TOKEN` | 空 | 仅 Workers 版：`POST /refresh`、`POST /probe` 的鉴权口令，留空则禁用 |
 
 ## 📡 API 端点
 
 | 端点 | 说明 |
 |------|------|
-| `GET /config.json` | **全部站点订阅** — 73 个采集站（不过滤），Base58 编码 |
-| `GET /config-safe.json` | **屏蔽成人版订阅** — 58 个采集站（过滤成人内容），Base58 编码 |
+| `GET /config.json` | **全部站点订阅** — 单源 73 站，配了 `EXTRA_SOURCES` 后合并去重（示例：101 站），Base58 编码 |
+| `GET /config-safe.json` | **屏蔽成人版订阅** — 过滤成人内容，Base58 编码 |
 | `GET /config.txt` | TVBox 风格 TXT（全部站点） |
 | `GET /config-safe.txt` | TVBox 风格 TXT（屏蔽成人版） |
 | `GET /` | Web 状态面板 |
-| `GET /health` | 健康检查（`status`: `ok` / `starting` / `stale`） |
-| `GET /stats` | 统计信息 + 全部源列表 |
+| `GET /health` | 健康检查（`status`: `ok` / `starting` / `stale`，含每个源的贡献数） |
+| `GET /stats` | 统计信息 + 全部源列表 + 探测摘要 |
+| `GET /sources` | 每个源的探测结果明细（`alive` / `flaky` / `unreachable` / `dead`） |
 | `POST /refresh` | 手动触发抓取（仅 Workers 版，需 `ADMIN_TOKEN`） |
+| `POST /probe` | 手动探测一批源（仅 Workers 版，需 `ADMIN_TOKEN`） |
 
 ### 状态码约定
 
@@ -114,14 +124,24 @@ python main.py --once
 
 ### 两个订阅版本
 
-| 版本 | 订阅地址 | 站点数 | 适用场景 |
+| 版本 | 订阅地址 | 站点数（单源 / 多源合并） | 适用场景 |
 |------|---------|--------|---------|
-| 📦 全部站点 | `<BASE_URL>/config.json` | 73 | 完整资源覆盖 |
-| 🛡️ 屏蔽成人版 | `<BASE_URL>/config-safe.json` | 58 | 家庭/公开场景 |
+| 📦 全部站点 | `<BASE_URL>/config.json` | 73 / 101 | 完整资源覆盖 |
+| 🛡️ 屏蔽成人版 | `<BASE_URL>/config-safe.json` | 58 / 85 | 家庭/公开场景 |
 
-`<BASE_URL>` 在 Workers 版是 `https://mtv-source-converter.<你的子域>.workers.dev`，在 Docker/Python 版是 `http://<服务器IP>:8080`。
+`<BASE_URL>` 在 Workers 版是你的自定义域名（`*.workers.dev` 国内不通），在 Docker/Python 版是 `http://<服务器IP>:8080`。
 
 屏蔽版会过滤名称或域名中包含成人关键词的采集站（湿乐园、番号、麻豆、黑料、色猫等）。
+
+### 多源合并与死源剔除
+
+配了 `EXTRA_SOURCES` 就会把多个上游合起来，按 API 域名去重（主源优先），
+并剔除探测判定为死源的站。探测判据分两级：
+
+- **硬证据**（HTTP 4xx、返回 RSS 而非苹果 CMS JSON）→ 连续 2 次就剔除
+- **软证据**（超时、连接失败、5xx、错误页 HTML）→ 只记录，<u>永不剔除</u>
+
+这样能避免「探测端自己网络不通」把好源成片误杀。详见 [cloudflare/README.md](cloudflare/README.md)。
 
 ## 🔗 与 MoonTVPlus 配合使用
 

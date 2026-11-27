@@ -1,6 +1,6 @@
 # MTV Source Converter - Docker Compose
-# 定时从 ziyuanzu.com 抓取采集站清单，转换为 MoonTVPlus 配置
-# 通过 HTTP 提供订阅地址，供 MoonTVPlus 的 CONFIG_SUBSCRIPTION_URL 拉取
+# 每天 01:00 / 13:00 从多个上游抓采集站清单，合并去重、剔除死源，
+# 转换为 MoonTVPlus 配置，通过 HTTP 提供订阅地址
 
 services:
   mtv-source-converter:
@@ -10,10 +10,17 @@ services:
     ports:
       - "8080:8080"
     environment:
-      # 数据源地址（ziyuanzu.com 采集站 JSON）
+      # 主数据源（ziyuanzu.com 采集站 JSON）
       SOURCE_URL: https://www.ziyuanzu.com/download/ziyuanzu-cms-interfaces.json
-      # 定时抓取间隔（秒），默认 2 小时
-      FETCH_INTERVAL: "7200"
+      # 额外数据源，逗号分隔。自动识别三种格式：
+      #   裸采集站数组 / MoonTVPlus 明文 JSON / Base58 订阅串
+      # 例（明文最省 CPU）：
+      #   EXTRA_SOURCES: "https://pz.v88.qzz.io?format=0&source=full"
+      EXTRA_SOURCES: ""
+      # 定时抓取的整点（本地时区小时数），默认每天 01:00 和 13:00
+      FETCH_HOURS: "1,13"
+      # 旧配置：设成正数则按固定间隔跑（秒），忽略 FETCH_HOURS。0 = 用 FETCH_HOURS
+      FETCH_INTERVAL: "0"
       # HTTP 服务端口
       HTTP_PORT: "8080"
       # MoonTVPlus 配置中的 cache_time（秒）
@@ -24,6 +31,16 @@ services:
       FETCH_RETRIES: "3"
       # 数据超过这么多小时没更新就判定为 stale（/health 显示 status=stale）
       STALE_IF_ERROR_HOURS: "72"
+      # ---- 源可用性探测 ----
+      # 只有「硬证据」失败（4xx / 返回 RSS 而非苹果 CMS JSON）才计入剔除；
+      # 超时和连接失败只记录不剔除，避免探测端网络问题误杀好源。
+      PROBE_ENABLED: "true"
+      # 0 = 全量探测；正数 = 每次最多测这么多
+      PROBE_LIMIT: "0"
+      PROBE_TIMEOUT: "8"
+      PROBE_CONCURRENCY: "16"
+      # 连续硬失败多少次就从输出里剔除
+      PROBE_FAIL_THRESHOLD: "2"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
       interval: 5m
