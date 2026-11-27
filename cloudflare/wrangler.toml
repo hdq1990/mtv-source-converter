@@ -1,0 +1,24 @@
+name = "mtv-source-converter"
+main = "src/index.ts"
+compatibility_date = "2025-01-15"
+compatibility_flags = ["nodejs_compat"]
+
+workers_dev = true
+preview_urls = true
+
+[observability]
+enabled = true
+
+[triggers]
+crons = ["0 */2 * * *"]
+
+[[kv_namespaces]]
+binding = "CONFIG"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+[vars]
+SOURCE_URL = "https://www.ziyuanzu.com/download/ziyuanzu-cms-interfaces.json"
+CACHE_TIME = "7200"
+FETCH_TIMEOUT = "30"
+FETCH_RETRIES = "3"
+STALE_IF_ERROR_HOURS = "72"
