@@ -6,6 +6,12 @@ compatibility_flags = ["nodejs_compat"]
 workers_dev = true
 preview_urls = true
 
+# 自定义域：国内无法直连 *.workers.dev（DNS 污染 + TLS RST），
+# 必须绑一个托管在本账号 Cloudflare 的域名才能访问。
+routes = [
+  { pattern = "mtv.hdq1990.us.ci", custom_domain = true }
+]
+
 [observability]
 enabled = true
 
@@ -19,7 +25,8 @@ crons = ["0 */2 * * *", "2 */2 * * *"]
 
 [[kv_namespaces]]
 binding = "CONFIG"
-id = "REPLACE_WITH_KV_NAMESPACE_ID"
+id = "615f11f18dc243b99401906e443e7173"
+preview_id = "9b99300f2b034795ba6c7da378cceff8"
 
 [vars]
 SOURCE_URL = "https://www.ziyuanzu.com/download/ziyuanzu-cms-interfaces.json"

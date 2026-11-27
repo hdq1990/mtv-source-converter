@@ -43,15 +43,17 @@ npx wrangler kv namespace create CONFIG
 npm run deploy
 ```
 
-部署后访问 `https://mtv-source-converter.<你的子域>.workers.dev/`，详细指南（含 CPU 预算说明、故障排查、GitHub Actions 预热方案）见 [cloudflare/README.md](cloudflare/README.md)。
+详细指南（CPU 预算、自定义域名、故障排查、GitHub Actions 预热方案）见 [cloudflare/README.md](cloudflare/README.md)。
+
+> ⚠️ **中国大陆必须绑自定义域名**。`*.workers.dev` 在国内被 DNS 污染 + TLS RST，直连不通。在 `wrangler.toml` 加一条 `routes = [{ pattern = "mtv.你的域名.com", custom_domain = true }]` 再 deploy 即可。
 
 MoonTVPlus 订阅地址：
 
 ```
-https://mtv-source-converter.<你的子域>.workers.dev/config.json
+https://mtv.<你的域名>/config.json
 ```
 
-> ⚠️ Base58 编码单份约 14 ms CPU，而 Workers 免费套餐是 10 ms/次。本项目已把编码放进 Cron、请求路径零编码，但 Cron 那次仍会小幅超出。若 Dashboard 里出现 `exceededCpu`，用 Docker 版做订阅源、或升级 Workers Paid（$5/月）、或用 GitHub Actions 预热 KV —— 三种做法都写在 [cloudflare/README.md](cloudflare/README.md) 里。
+> ⚠️ Base58 编码单份约 14 ms CPU，而 Workers 免费套餐是 10 ms/次。本项目已把编码放进 Cron、请求路径零编码，冷启动/manual refresh 实测在免费账号上正常返回 200（有容错余量），但不是硬保证。若 Dashboard 出现 `exceededCpu`，用 Docker 版做订阅源、或升级 Workers Paid（$5/月）、或用 GitHub Actions 预热 KV —— 三种做法都写在 [cloudflare/README.md](cloudflare/README.md) 里。
 
 ### 方案 B1：Docker Compose 部署（内网自用，CPU 不受限）
 

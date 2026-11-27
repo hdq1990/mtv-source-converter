@@ -43,7 +43,9 @@ GET /config.json（KV 为空）──► 请求内实时抓取 + 只编码这一
 2. **Cron 拆成两跳**：`:00` 编「全部版」，`:02` 编「屏蔽版」，单次调用只编一份。
 3. **冷启动只编被请求的那一份**，不会一次把两份都算了。
 
-即便如此，`:00` 那次仍然会跑 14 ms 左右，**技术上超出免费套餐 10 ms 预算**。Cloudflare 对「偶尔小幅超出」有内置容错（官方文档原话：*Each isolate has some built-in flexibility to allow for cases where your Worker infrequently runs over the configured limit*），Cron 每 2 小时才跑一次，落在容错范围内的概率很高。但这是**概率**，不是保证。
+即便如此，`:00` 那次仍然会跑 14 ms 左右，**技术上超出免费套餐 10 ms 预算**。Cloudflare 对「偶尔小幅超出」有内置容错（官方文档原话：*Each isolate has some built-in flexibility to allow for cases where your Worker infrequently runs over the configured limit*），Cron 每 2 小时才跑一次，落在容错范围内的概率很高。
+
+**实测结论（2026-11 在免费账号上跑通）**：冷启动 `/config.json`（抓取 + 转换 + 1 份 Base58）、`/config-safe.json`（第 2 份 Base58）、以及手动 `POST /refresh`（一次编 2 份 ≈ 28 ms）**全部返回 200，没有出现 `exceededCpu`**。也就是说这个预算余量在真实免费套餐上是够用的 —— 但仍然不是硬保证，如果以后数据量翻倍或 Cloudflare 调整策略，还是会撞上。
 
 如果 `wrangler tail` 或 Dashboard → Metrics → Errors 里出现 `exceededCpu`，按优先级选一个：
 
@@ -145,21 +147,37 @@ npm run deploy
 输出：
 
 ```
-Total Upload: 42.08 KiB / gzip: 11.81 KiB
+Total Upload: 42.90 KiB / gzip: 11.98 KiB
 Uploaded mtv-source-converter (x.xx sec)
-Published mtv-source-converter
+Deployed mtv-source-converter triggers (x.xx sec)
   https://mtv-source-converter.<你的子域>.workers.dev
+  schedule: 0 */2 * * *
+  schedule: 2 */2 * * *
 ```
-
-打开那个 URL 就是状态页。第一次访问 `/config.json` 会触发实时抓取（约 2–4 秒），之后全部走 KV，几十毫秒返回。
 
 > 首次部署后建议手动预热一次，别等 2 小时后第一次 Cron：
 > ```bash
 > npx wrangler secret put ADMIN_TOKEN     # 设一个口令
-> curl -X POST -H "X-Admin-Token: 你的口令" https://<worker>/refresh
+> curl -X POST -H "X-Admin-Token: 你的口令" https://<你的域名>/refresh
 > ```
 
-### 四、（可选）开启手动刷新
+### 四、⚠️ 中国大陆必须绑自定义域名
+
+**`*.workers.dev` 在国内不可用**：DNS 被污染（返回 `face:b00c` 这类假 IP），而且即使手动拿真实 Cloudflare IP 直连，TLS 握手也会被 RST。这不是本项目的问题，是域名本身被阻断。
+
+唯一的解决办法是绑一个 NS 已托管到 Cloudflare 的自有域名。在 `wrangler.toml` 里加：
+
+```toml
+routes = [
+  { pattern = "mtv.your-domain.com", custom_domain = true }
+]
+```
+
+再 `npm run deploy`，wrangler 会自动创建 DNS 记录并签发证书（Custom Domain 模式，几秒到几分钟生效）。之后用 `https://mtv.your-domain.com/config.json` 做订阅地址。
+
+验证：`curl -sS https://mtv.your-domain.com/health`，能返回 JSON 就说明通了。
+
+### 五、（可选）开启手动刷新
 
 ```bash
 npx wrangler secret put ADMIN_TOKEN
@@ -168,7 +186,7 @@ npx wrangler secret put ADMIN_TOKEN
 之后可以这样触发（**推荐用 header，token 不会进访问日志**）：
 
 ```bash
-curl -X POST -H "X-Admin-Token: 你的口令" https://<worker>/refresh
+curl -X POST -H "X-Admin-Token: 你的口令" https://<你的域名>/refresh
 ```
 
 `?token=xxx` 查询参数也支持，但会留在 Cloudflare 的请求日志里，能用 header 就别用 query。不设置 `ADMIN_TOKEN` 则该端点返回 403，Cron 不受影响。
@@ -186,10 +204,10 @@ curl -X POST -H "X-Admin-Token: 你的口令" https://<worker>/refresh
 | `GET /stats` | 统计 + 全部源 | JSON |
 | `POST /refresh` | 手动刷新（需 `ADMIN_TOKEN`） | JSON |
 
-MoonTVPlus 里填：
+MoonTVPlus 里填（国内请用自定义域名，`workers.dev` 不通）：
 
 ```
-CONFIG_SUBSCRIPTION_URL=https://mtv-source-converter.<你的子域>.workers.dev/config.json
+CONFIG_SUBSCRIPTION_URL=https://mtv.your-domain.com/config.json
 ```
 
 家庭场景用 `/config-safe.json`。
